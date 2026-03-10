@@ -6,6 +6,8 @@
 
 use kernel::prelude::*;
 
+pub mod util;
+
 #[allow(
     dead_code,
     missing_docs,
