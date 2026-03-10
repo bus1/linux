@@ -3,3 +3,5 @@
 //!
 //! This module provides utilities that can be used independently of the core
 //! module.
+
+pub mod field;
