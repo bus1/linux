@@ -166,4 +166,34 @@ impl<T: ?Sized, U> LockedBy<T, U> {
         // SAFETY: `owner` is evidence that there is only one reference to the owner.
         unsafe { &mut *self.data.get() }
     }
+
+    /// Returns a mutable reference to the protected data when the caller
+    /// provides evidence (via a mutable reference) that the owner is locked.
+    ///
+    /// Unlike [`Self::access_mut()`] this does not require the mutable
+    /// reference to be borrowed for the requested lifetime, and thus multiple
+    /// different [`LockedBy`] objects can be acquired simultaneously.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `owner` is different from the data protected by the lock used
+    /// in [`new`](LockedBy::new).
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold `owner` for `'a` and must not call into this
+    /// function more than once under the same lifetime `'a`.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn access_mut_unchecked<'a>(&'a self, owner: &mut U) -> &'a mut T {
+        build_assert!(
+            size_of::<U>() > 0,
+            "`U` cannot be a ZST because `owner` wouldn't be unique"
+        );
+        if !ptr::eq(owner, self.owner) {
+            panic!("mismatched owners");
+        }
+
+        // SAFETY: `owner` is evidence that there is only one reference to the owner.
+        unsafe { &mut *self.data.get() }
+    }
 }
