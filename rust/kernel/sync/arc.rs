@@ -368,6 +368,27 @@ impl<T: ?Sized> Arc<T> {
             None
         }
     }
+
+    /// Drop this [`Arc`] unless it is the last reference.
+    ///
+    /// When this is the last reference to the `Arc`, it is returned as `Some`
+    /// unmodified. Otherwise, the `Arc` is dropped and [`None`] is returned.
+    ///
+    /// This function will never release the last reference to the object, and
+    /// as such never call its destructor.
+    pub fn drop_unless_unique(this: Self) -> Option<Self> {
+        let this = ManuallyDrop::new(this);
+
+        // SAFETY: We own a refcount, so the pointer is still valid.
+        if unsafe { this.ptr.as_ref() }.refcount.dec_not_one() {
+            // A single ref-count was dropped, but it was not the last. We
+            // manually drop `this` without invoking `Drop`.
+            None
+        } else {
+            // This was a no-op, return the reference to the caller.
+            Some(ManuallyDrop::into_inner(this))
+        }
+    }
 }
 
 // SAFETY: The pointer returned by `into_foreign` was originally allocated as an

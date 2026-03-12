@@ -105,6 +105,22 @@ impl Refcount {
         // SAFETY: `self.as_ptr()` is valid.
         unsafe { bindings::refcount_dec_and_test(self.as_ptr()) }
     }
+
+    /// Decrement a refcount if it is not 1.
+    ///
+    /// It will `WARN` on underflow and fail to decrement when saturated.
+    ///
+    /// Provides release memory ordering when succeeding in decrementing the
+    /// refcount.
+    ///
+    /// Returns true if the decrement operation succeeded, false if the
+    /// decrement operation was skipped as the refcount is 1.
+    #[inline]
+    #[must_use = "refcount release is conditional and must be checked"]
+    pub fn dec_not_one(&self) -> bool {
+        // SAFETY: `self.as_ptr()` is valid.
+        unsafe { bindings::refcount_dec_not_one(self.as_ptr()) }
+    }
 }
 
 // SAFETY: `refcount_t` is thread-safe.
