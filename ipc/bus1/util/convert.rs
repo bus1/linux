@@ -3,6 +3,7 @@
 //! This module contains utilities to help dealing with conversions between
 //! types.
 
+use core::ptr::NonNull;
 use kernel::prelude::*;
 
 /// Convert a value into a raw pointer to its dereferenced value.
@@ -50,12 +51,12 @@ pub unsafe trait IntoDeref: Sized + core::ops::Deref {
     ///
     /// The returned pointer is guaranteed to be convertible to a shared
     /// reference for any caller-chosen lifetime `'a` where `Self: 'a`.
-    fn into_deref(v: Self) -> *mut Self::Target;
+    fn into_deref(v: Self) -> NonNull<Self::Target>;
 
     /// Convert a pinned value into a raw pointer to its dereferenced value.
     ///
     /// This is the pinned equivalent of [`Self::into_deref()`].
-    fn pin_into_deref<'a>(v: Pin<Self>) -> *mut Self::Target {
+    fn pin_into_deref<'a>(v: Pin<Self>) -> NonNull<Self::Target> {
         // SAFETY: Pinned types must ensure they uphold pinning guarantees
         //     just like `Deref` does (see trait requirements).
         Self::into_deref(unsafe { Pin::into_inner_unchecked(v) })
@@ -102,7 +103,7 @@ pub unsafe trait FromDeref: Sized + core::ops::Deref {
     ///
     /// It is always safe to call this on values obtained via [`IntoDeref`], as
     /// long as the raw pointer is no longer used afterwards.
-    unsafe fn from_deref(v: *mut Self::Target) -> Self;
+    unsafe fn from_deref(v: NonNull<Self::Target>) -> Self;
 
     /// Convert a dereferenced value back to its original pinned value.
     ///
@@ -112,7 +113,7 @@ pub unsafe trait FromDeref: Sized + core::ops::Deref {
     ///
     /// The caller must guarantee that the original value was a pinned pointer.
     /// Furthermore, all requirements of [`Self::from_deref()`] apply.
-    unsafe fn pin_from_deref(v: *mut Self::Target) -> Pin<Self> {
+    unsafe fn pin_from_deref(v: NonNull<Self::Target>) -> Pin<Self> {
         // SAFETY: Pinned types must ensure they uphold pinning guarantees
         //     just like `Deref` does (see trait requirements). Also, the
         //     caller must ensure the original value was pinned.
@@ -126,50 +127,50 @@ mod impls {
     use kernel::sync::Arc;
 
     unsafe impl<T: ?Sized> IntoDeref for &T {
-        fn into_deref(v: Self) -> *mut Self::Target {
-            v as *const Self::Target as *mut Self::Target
+        fn into_deref(v: Self) -> NonNull<Self::Target> {
+            NonNull::from_ref(v)
         }
     }
 
     unsafe impl<T: ?Sized> FromDeref for &T {
-        unsafe fn from_deref(v: *mut Self::Target) -> Self {
-            unsafe { &*v }
+        unsafe fn from_deref(v: NonNull<Self::Target>) -> Self {
+            unsafe { v.as_ref() }
         }
     }
 
     unsafe impl<T: ?Sized> IntoDeref for &mut T {
-        fn into_deref(v: Self) -> *mut Self::Target {
-            v as *mut Self::Target
+        fn into_deref(v: Self) -> NonNull<Self::Target> {
+            NonNull::from_mut(v)
         }
     }
 
     unsafe impl<T: ?Sized> FromDeref for &mut T {
-        unsafe fn from_deref(v: *mut Self::Target) -> Self {
-            unsafe { &mut *v }
+        unsafe fn from_deref(mut v: NonNull<Self::Target>) -> Self {
+            unsafe { v.as_mut() }
         }
     }
 
     unsafe impl<T: ?Sized, A: Allocator> IntoDeref for Box<T, A> {
-        fn into_deref(v: Self) -> *mut Self::Target {
-            Box::into_raw(v)
+        fn into_deref(v: Self) -> NonNull<Self::Target> {
+            unsafe { NonNull::new_unchecked(Box::into_raw(v)) }
         }
     }
 
     unsafe impl<T: ?Sized, A: Allocator> FromDeref for Box<T, A> {
-        unsafe fn from_deref(v: *mut Self::Target) -> Self {
-            unsafe { Box::from_raw(v) }
+        unsafe fn from_deref(v: NonNull<Self::Target>) -> Self {
+            unsafe { Box::from_raw(v.as_ptr()) }
         }
     }
 
     unsafe impl<T: ?Sized> IntoDeref for Arc<T> {
-        fn into_deref(v: Self) -> *mut Self::Target {
-            Arc::into_raw(v) as *mut Self::Target
+        fn into_deref(v: Self) -> NonNull<Self::Target> {
+            unsafe { NonNull::new_unchecked(Arc::into_raw(v) as *mut _) }
         }
     }
 
     unsafe impl<T: ?Sized> FromDeref for Arc<T> {
-        unsafe fn from_deref(v: *mut Self::Target) -> Self {
-            unsafe { Arc::from_raw(v) }
+        unsafe fn from_deref(v: NonNull<Self::Target>) -> Self {
+            unsafe { Arc::from_raw(v.as_ptr()) }
         }
     }
 }
@@ -188,9 +189,9 @@ mod test {
             let p: *const u64 = &raw const v;
             let f: &u64 = &v;
 
-            let d: *mut u64 = IntoDeref::into_deref(f);
-            assert_eq!(71, unsafe { *d });
-            assert!(core::ptr::eq(p, d));
+            let d: NonNull<u64> = IntoDeref::into_deref(f);
+            assert_eq!(71, unsafe { *d.as_ref() });
+            assert!(core::ptr::eq(p, d.as_ptr()));
 
             let r: &u64 = unsafe { FromDeref::from_deref(d) };
             assert_eq!(71, *r);
@@ -201,9 +202,9 @@ mod test {
             let p: *mut u64 = &raw mut v;
             let f: &mut u64 = &mut v;
 
-            let d: *mut u64 = IntoDeref::into_deref(f);
-            assert_eq!(71, unsafe { *d });
-            assert!(core::ptr::eq(p, d));
+            let d: NonNull<u64> = IntoDeref::into_deref(f);
+            assert_eq!(71, unsafe { *d.as_ref() });
+            assert!(core::ptr::eq(p, d.as_ptr()));
 
             let r: &mut u64 = unsafe { FromDeref::from_deref(d) };
             assert_eq!(71, *r);
@@ -214,9 +215,9 @@ mod test {
             let f: KBox<u64> = KBox::new(v, GFP_KERNEL).unwrap();
             let p: *const u64 = &raw const *f;
 
-            let d: *mut u64 = IntoDeref::into_deref(f);
-            assert_eq!(71, unsafe { *d });
-            assert!(core::ptr::eq(p, d));
+            let d: NonNull<u64> = IntoDeref::into_deref(f);
+            assert_eq!(71, unsafe { *d.as_ref() });
+            assert!(core::ptr::eq(p, d.as_ptr()));
 
             let r: KBox<u64> = unsafe { FromDeref::from_deref(d) };
             assert_eq!(71, *r);
@@ -227,9 +228,9 @@ mod test {
             let f: Arc<u64> = Arc::new(v, GFP_KERNEL).unwrap();
             let p: *const u64 = &raw const *f;
 
-            let d: *mut u64 = IntoDeref::into_deref(f);
-            assert_eq!(71, unsafe { *d });
-            assert!(core::ptr::eq(p, d));
+            let d: NonNull<u64> = IntoDeref::into_deref(f);
+            assert_eq!(71, unsafe { *d.as_ref() });
+            assert!(core::ptr::eq(p, d.as_ptr()));
 
             let r: Arc<u64> = unsafe { FromDeref::from_deref(d) };
             assert_eq!(71, *r);
