@@ -160,7 +160,7 @@ macro_rules! util_field_unsafe_impl_field {
 #[macro_export]
 macro_rules! util_field_unsafe_impl_pin_field {
     ($base:ty, $field:ident, $type:ty $(,)?) => {
-        $crate::util_field_unsafe_impl_field!($base, $field, $type);
+        $crate::util::field::unsafe_impl_field!($base, $field, $type);
         unsafe impl $crate::util::field::PinField
         for $crate::util::field::FieldRepr<
             $base,
