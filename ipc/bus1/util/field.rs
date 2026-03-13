@@ -214,7 +214,7 @@ macro_rules! util_field_typed_field_of {
 #[doc(inline)]
 pub use util_field_unsafe_impl_field as unsafe_impl_field;
 
-/// Implement [`Field`] for a structurally pinned member field.
+/// Implement [`PinField`] for a structurally pinned member field.
 ///
 /// This works like [`unsafe_impl_field!`] but implements [`PinField`] on top.
 /// of [`Field`].
