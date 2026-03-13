@@ -18,3 +18,5 @@ pub mod util;
 pub mod capi {
     include!(env!("BUS1_CAPI_PATH"));
 }
+
+const __LOG_PREFIX: &[u8] = b"bus1\0";
