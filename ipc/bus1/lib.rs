@@ -6,6 +6,7 @@
 
 use kernel::prelude::*;
 
+pub mod acct;
 pub mod util;
 
 #[allow(
