@@ -888,7 +888,7 @@ where
     /// Unlink the current entry from the tree, consuming the cursor.
     ///
     /// Works like [`Self::try_unlink()`] but panics if the tree is empty.
-    pub fn unlink(mut self) -> Pin<Ref> {
+    pub fn unlink(self) -> Pin<Ref> {
         let ptr = &*self.tree as *const _;
         self.try_unlink().unwrap_or_else(
             || core::panic!(

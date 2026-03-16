@@ -477,7 +477,7 @@ where
 {
     let ent = util::arc_pin(Arc::drop_unless_unique(ent)?);
 
-    if let Some(mut cur) = tree.try_claim_mut(ent.as_ref()) {
+    if let Some(cur) = tree.try_claim_mut(ent.as_ref()) {
         if let Some(v) = cur.try_unlink() {
             let _v = Arc::into_raw(util::arc_unpin(v));
             *tree_len -= 1;
@@ -639,14 +639,6 @@ impl UserRef {
         Self {
             arc: ManuallyDrop::new(arc),
         }
-    }
-
-    fn get_quota(
-        &self,
-        id: Id,
-    ) -> Result<QuotaRef, AllocError> {
-        let mut user_guard = self.arc.inner.lock();
-        unsafe { user_guard.as_mut().get_quota(self, id) }
     }
 
     fn charge_claims(
@@ -814,7 +806,7 @@ impl UserRef {
         // SAFETY: `Trace.inner` is structurally pinned and `user_inner` is
         //     held sufficiently long. `access_mut_unchecked()` is only called
         //     once on this object.
-        let mut trace_inner = unsafe {
+        let trace_inner = unsafe {
             Pin::new_unchecked(
                 trace.arc.inner.access_mut_unchecked(
                     Pin::into_inner_unchecked(user_inner.as_mut()),
@@ -941,40 +933,6 @@ impl QuotaRef {
 
     fn cross_user(&self) -> bool {
         self.arc.id != self.arc.user.arc.id
-    }
-
-    fn get_trace(
-        &self,
-        actor: ArcBorrow<'_, Actor>,
-    ) -> Result<TraceRef, AllocError> {
-        let actor_addr = actor.addr();
-
-        let mut user_guard = self.arc.user.arc.inner.lock();
-        // SAFETY: `Quota::inner` and `QuotaInner::traces` are
-        //     structurally pinned.
-        let (traces, traces_len) = unsafe {
-            let inner = self.arc.inner.access_mut(
-                Pin::into_inner_unchecked(user_guard.as_mut())
-            );
-            (
-                Pin::new_unchecked(&mut inner.traces),
-                &mut inner.traces_len,
-            )
-        };
-
-        // SAFETY: The new `Arc` is immediately wrapped in `QuotaRef`, which
-        //     ensures to merge back the split `Arc` of `find_or_insert()`
-        //     on drop.
-        let trace = unsafe {
-            find_or_insert(
-                traces,
-                traces_len,
-                |ent| actor_addr.cmp(&ent.actor.as_arc_borrow().addr()),
-                || Trace::new(self.clone(), actor.into()),
-            )?
-        };
-
-        Ok(TraceRef::new(trace))
     }
 }
 
@@ -1112,7 +1070,7 @@ impl TraceRef {
             //
 
             // SAFETY: `Quota.inner` is structurally pinned.
-            let mut quota_inner = unsafe {
+            let quota_inner = unsafe {
                 Pin::new_unchecked(
                     self.arc.quota.arc.inner.access_mut_unchecked(
                         Pin::into_inner_unchecked(user_inner.as_mut()),
@@ -1120,7 +1078,7 @@ impl TraceRef {
                 )
             };
             // SAFETY: `Trace.inner` is structurally pinned.
-            let mut trace_inner = unsafe {
+            let trace_inner = unsafe {
                 Pin::new_unchecked(
                     self.arc.inner.access_mut_unchecked(
                         Pin::into_inner_unchecked(user_inner.as_mut()),
