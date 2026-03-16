@@ -36,3 +36,19 @@ pub fn arc_unpin<T>(v: Pin<Arc<T>>) -> Arc<T> {
     // SAFETY: `Arc<T>` guarantees its target is pinned, even if not wrapped.
     unsafe { Pin::into_inner_unchecked(v) }
 }
+
+/// Create a [`NonNull`] from a reference.
+///
+/// This is a backport of [`core::ptr::NonNull::from_ref()`].
+pub fn nonnull_from_ref<T: ?Sized>(v: &T) -> core::ptr::NonNull<T> {
+    // SAFETY: A reference cannot be NULL.
+    unsafe { core::ptr::NonNull::new_unchecked(core::ptr::from_ref(v).cast_mut()) }
+}
+
+/// Create a [`NonNull`] from a reference.
+///
+/// This is a backport of [`core::ptr::NonNull::from_mut()`].
+pub fn nonnull_from_mut<T: ?Sized>(v: &mut T) -> core::ptr::NonNull<T> {
+    // SAFETY: A reference cannot be NULL.
+    unsafe { core::ptr::NonNull::new_unchecked(v) }
+}

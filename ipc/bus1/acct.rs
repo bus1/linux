@@ -416,21 +416,21 @@ where
     Some(minimum)
 }
 
-// Find an entry in a lookup tree, or insert a new one if not found.
-//
-// This will use `cmp_fn` to look for an entry in `tree`. If found, the entry
-// is returned. Otherwise, `new_fn` is used to create a new entry and store
-// it in `tree` at the same position.
-//
-// To ensure tree order, the caller should make sure the newly created entry
-// is consistent with the comparator `cmp_fn`.
-//
-// ## Safety
-//
-// When inserting a new entry, this splits a single reference count across 2
-// `Arc`s. One that is returned to the caller, and one that is stored in the
-// lookup tree. The caller must ensure to use `drop_or_unlink()` when dropping
-// the last reference, or otherwise merge those `Arc`s back together.
+/// Find an entry in a lookup tree, or insert a new one if not found.
+///
+/// This will use `cmp_fn` to look for an entry in `tree`. If found, the entry
+/// is returned. Otherwise, `new_fn` is used to create a new entry and store
+/// it in `tree` at the same position.
+///
+/// To ensure tree order, the caller should make sure the newly created entry
+/// is consistent with the comparator `cmp_fn`.
+///
+/// ## Safety
+///
+/// When inserting a new entry, this splits a single reference count across 2
+/// `Arc`s. One that is returned to the caller, and one that is stored in the
+/// lookup tree. The caller must ensure to use `drop_or_unlink()` when dropping
+/// the last reference, or otherwise merge those `Arc`s back together.
 unsafe fn find_or_insert<T, Frt, CmpFn, NewFn>(
     tree: Pin<&mut rb::Tree<Arc<T>, Frt>>,
     tree_len: &mut usize,
@@ -458,15 +458,15 @@ where
     }
 }
 
-// Unlink an `Arc` from a tree, if it is the last.
-//
-// This tries to drop an `Arc`, but only if it is not the last `Arc`. If
-// the drop goes through, `None` is returned. If not, the `Arc` is unlinked
-// from `tree` and returned to the caller.
-//
-// The `Arc` stored in the tree is leaked via `Arc::into_raw()`. To prevent
-// this leak, the caller should have stored a shared reference in the tree
-// in the first place.
+/// Unlink an `Arc` from a tree, if it is the last.
+///
+/// This tries to drop an `Arc`, but only if it is not the last `Arc`. If
+/// the drop goes through, `None` is returned. If not, the `Arc` is unlinked
+/// from `tree` and returned to the caller.
+///
+/// The `Arc` stored in the tree is leaked via `Arc::into_raw()`. To prevent
+/// this leak, the caller should have stored a shared reference in the tree
+/// in the first place.
 fn drop_or_unlink<T, Frt>(
     tree: Pin<&mut rb::Tree<Arc<T>, Frt>>,
     tree_len: &mut usize,
@@ -567,6 +567,7 @@ impl Acct {
 }
 
 impl AcctInner {
+    #[allow(clippy::type_complexity)]
     fn unfold_mut(
         self: Pin<&mut Self>,
     ) -> (
@@ -574,6 +575,7 @@ impl AcctInner {
         &mut usize,
         &mut [Value; N_SLOTS],
     ) {
+        // SAFETY: Only `AcctInner.users` is structurally pinned.
         unsafe {
             let inner = Pin::into_inner_unchecked(self);
             (
@@ -601,7 +603,7 @@ impl Actor {
     ) -> Result<Arc<Self>, AllocError> {
         Arc::new(
             Self {
-                user: user,
+                user,
             },
             GFP_KERNEL,
         )
@@ -615,7 +617,7 @@ impl Actor {
     fn addr(self: ArcBorrow<'_, Self>) -> usize {
         // In the kernel, `Arc` is always pinned, so the address can be used as
         // stable indicator for this actor.
-        (&raw const *self).addr()
+        (&raw const *self).cast::<()>() as usize
     }
 
     /// Charge resources on the user of this actor with the given claimant
@@ -876,6 +878,7 @@ impl User {
 }
 
 impl UserInner {
+    #[allow(clippy::type_complexity)]
     fn unfold_mut(
         self: Pin<&mut Self>,
     ) -> (
@@ -884,6 +887,7 @@ impl UserInner {
         &mut [Value; N_SLOTS],
         &mut Claim,
     ) {
+        // SAFETY: Only `UserInner.quotas` is structurally pinned.
         unsafe {
             let inner = Pin::into_inner_unchecked(self);
             (
@@ -895,11 +899,11 @@ impl UserInner {
         }
     }
 
-    // Find a quota object, or create a new one.
-    //
-    // ## Safety
-    //
-    // `self_ref` and `self` must refer to the same `User` object.
+    /// Find a quota object, or create a new one.
+    ///
+    /// ## Safety
+    ///
+    /// `self_ref` and `self` must refer to the same `User` object.
     unsafe fn get_quota(
         self: Pin<&mut Self>,
         self_ref: &UserRef,
@@ -970,10 +974,10 @@ impl Quota {
         );
         Arc::new(
             Self {
-                user: user,
+                user,
                 user_rb: Default::default(),
-                id: id,
-                inner: inner,
+                id,
+                inner,
             },
             GFP_KERNEL,
         )
@@ -981,11 +985,11 @@ impl Quota {
 }
 
 impl QuotaInner {
-    // Find a trace object, or create a new one.
-    //
-    // ## Safety
-    //
-    // `self_ref` and `self` must refer to the same `Quota` object.
+    /// Find a trace object, or create a new one.
+    ///
+    /// ## Safety
+    ///
+    /// `self_ref` and `self` must refer to the same `Quota` object.
     unsafe fn get_trace(
         self: Pin<&mut Self>,
         self_ref: &QuotaRef,
@@ -1027,27 +1031,28 @@ impl TraceRef {
         }
     }
 
-    // Turn the trace reference into a raw pointer.
-    //
-    // This will leak the trace and any pinned resources, unless the original
-    // trace object is recreated via `Self::from_raw()`.
+    /// Turn the trace reference into a raw pointer.
+    ///
+    /// This will leak the trace and any pinned resources, unless the original
+    /// trace object is recreated via `Self::from_raw()`.
     fn into_raw(mut this: Self) -> *mut Trace {
         // SAFETY: The drop-handler can be skipped if we leak the value, which
         //     we do here. We also do not expose access to the refcount, so
         //     either the value is leaked, or recreated via `Self::from_raw()`.
         let arc = unsafe { ManuallyDrop::take(&mut this.arc) };
         core::mem::forget(this);
-        Arc::into_raw(arc) as *mut _
+        Arc::into_raw(arc).cast_mut()
     }
 
-    // Recreate the trace reference from its raw pointer.
-    //
-    // ## Safety
-    //
-    // The caller must guarantee this pointer was acquired via
-    // `Self::into_raw()`, and they must refrain from using the pointer any
-    // further.
+    /// Recreate the trace reference from its raw pointer.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must guarantee this pointer was acquired via
+    /// `Self::into_raw()`, and they must refrain from using the pointer any
+    /// further.
     unsafe fn from_raw(trace: *mut Trace) -> Self {
+        // SAFETY: Delegated to caller.
         Self::new(unsafe { Arc::from_raw(trace) })
     }
 
@@ -1212,10 +1217,10 @@ impl Trace {
         );
         Arc::new(
             Self {
-                quota: quota,
+                quota,
                 quota_rb: Default::default(),
-                actor: actor,
-                inner: inner,
+                actor,
+                inner,
             },
             GFP_KERNEL,
         )
@@ -1255,11 +1260,9 @@ impl Charge {
     pub unsafe fn from_capi<'a>(
         capi: *mut capi::b1_acct_charge,
     ) -> &'a mut Self {
+        // SAFETY: Delegated to caller.
         unsafe {
-            core::mem::transmute::<
-                *mut capi::b1_acct_charge,
-                &'a mut Self,
-            >(capi)
+            &mut *capi.cast::<Self>()
         }
     }
 

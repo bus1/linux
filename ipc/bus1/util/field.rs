@@ -5,7 +5,7 @@
 //!
 //! This trait is just enough to get intrusive collections working. For
 //! generalized versions of this, see
-/// [field projections](https://github.com/rust-lang/rust/issues/145383).
+//! [field projections](https://github.com/rust-lang/rust/issues/145383).
 
 use kernel::prelude::*;
 
@@ -109,10 +109,7 @@ for FieldRepr<Base, Type, OFFSET> {
 ///
 /// The pointer `v` must point to an allocation of `BaseTy`, but that value can
 /// be uninitialized.
-pub unsafe fn field_of_ptr<Frt>(v: *mut Frt::Base) -> *mut Frt::Type
-where
-    Frt: ?Sized + Field,
-{
+pub unsafe fn field_of_ptr<Frt: Field>(v: *mut Frt::Base) -> *mut Frt::Type {
     // SAFETY: Validity of the allocation behind `v` is delegated to the
     //     caller. The offset calculation is guaranteed by the `Field` trait.
     unsafe { v.byte_offset(Frt::OFFSET as isize).cast() }
@@ -138,10 +135,7 @@ where
 ///
 /// The pointer `v` must point into an allocation of `BaseTy` at the offset of
 /// the member field described by `Field`, but the value can be uninitialized.
-pub unsafe fn base_of_ptr<Frt>(v: *mut Frt::Type) -> *mut Frt::Base
-where
-    Frt: ?Sized + Field,
-{
+pub unsafe fn base_of_ptr<Frt: Field>(v: *mut Frt::Type) -> *mut Frt::Base {
     // SAFETY: Validity of the allocation behind `v` is delegated to the
     //     caller. The offset calculation is guaranteed by the `Field` trait.
     unsafe { v.byte_offset(-(Frt::OFFSET as isize)).cast() }
@@ -178,8 +172,10 @@ macro_rules! util_field_impl_field {
             const OFFSET: usize = const {
                 // Verify the type of the member field.
                 let mut v = ::core::mem::MaybeUninit::<Self::Base>::uninit();
+                let v_ptr = core::ptr::from_mut(&mut v).cast::<Self::Base>();
+                // SAFETY: `v` is a valid allocation, a field access is safe.
                 let _: *mut Self::Type = unsafe {
-                    &raw mut ((*v.as_mut_ptr()).$field)
+                    &raw mut ((*v_ptr).$field)
                 };
                 ::core::mem::offset_of!(Self::Base, $field)
             };
@@ -286,6 +282,7 @@ pub use util_field_field_of as field_of;
 #[doc(inline)]
 pub use util_field_typed_field_of as typed_field_of;
 
+#[allow(clippy::undocumented_unsafe_blocks)]
 #[kunit_tests(bus1_util_field)]
 mod test {
     use super::*;

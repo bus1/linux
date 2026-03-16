@@ -37,7 +37,8 @@ help:
 	@echo
 	@echo "    man-build:          Build all man-pages"
 	@echo
-	@echo "    mod-build:          Build the bus1 kernel module (in-source)"
+	@echo "    mod-build:          Build the bus1 kernel module"
+	@echo "    mod-clippy:         Run `mod-build` with clippy"
 
 #
 # Target: BUILDDIR
@@ -124,6 +125,16 @@ mod-build: $(BUILDDIR)/mod/.config | $(BUILDDIR)/mod/
 	$(MAKE) \
 		-C "$(SRCDIR)" \
 		ARCH=um \
+		LLVM=1 \
+		O="$(BUILDDIR)/mod" \
+		"ipc/bus1/"
+
+.PHONY: mod-clippy
+mod-clippy: $(BUILDDIR)/mod/.config | $(BUILDDIR)/mod/
+	$(MAKE) \
+		-C "$(SRCDIR)" \
+		ARCH=um \
+		CLIPPY=1 \
 		LLVM=1 \
 		O="$(BUILDDIR)/mod" \
 		"ipc/bus1/"

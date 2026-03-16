@@ -270,14 +270,14 @@ where
     fn panic_acquire(v: Pin<Ref>) -> ! {
         core::panic!(
             "attempting to link a foreign node: {:?}",
-            &*v as *const _,
+            core::ptr::from_ref(&*v),
         );
     }
 
     fn panic_claim(v: Pin<&Ref::Target>) -> ! {
         core::panic!(
             "attempting to claim a foreign node: {:?}",
-            &*v as *const _,
+            core::ptr::from_ref(&*v),
         );
     }
 
@@ -297,15 +297,16 @@ where
         unsafe { &mut Pin::into_inner_unchecked(self).root }
     }
 
-    // Convert from reference target pointer to node pointer.
-    //
-    // ## Safety
-    //
-    // The reference target pointer must refer to a valid allocation of its
-    // type, but does not need to be initialized.
+    /// Convert from reference target pointer to node pointer.
+    ///
+    /// ## Safety
+    ///
+    /// The reference target pointer must refer to a valid allocation of its
+    /// type, but does not need to be initialized.
     unsafe fn to_node(
         p: NonNull<Ref::Target>,
     ) -> NonNull<Node> {
+        // SAFETY: Delegated to caller.
         unsafe {
             NonNull::new_unchecked(
                 util::field::field_of_ptr::<Frt>(p.as_ptr())
@@ -313,16 +314,17 @@ where
         }
     }
 
-    // Convert from node pointer to reference target pointer.
-    //
-    // ## Safety
-    //
-    // The node pointer must refer to a valid allocation of its type embedded
-    // in a reference target object. The allocation does not need to be
-    // initialized.
+    /// Convert from node pointer to reference target pointer.
+    ///
+    /// ## Safety
+    ///
+    /// The node pointer must refer to a valid allocation of its type embedded
+    /// in a reference target object. The allocation does not need to be
+    /// initialized.
     unsafe fn from_node(
         n: NonNull<Node>,
     ) -> NonNull<Ref::Target> {
+        // SAFETY: Delegated to caller.
         unsafe {
             NonNull::new_unchecked(
                 util::field::base_of_ptr::<Frt>(n.as_ptr())
@@ -330,28 +332,29 @@ where
         }
     }
 
-    // Clone a reference from its reference target pointer.
-    //
-    // This is only available if the reference implements `Clone`.
-    //
-    // ## Safety
-    //
-    // The reference target pointer must be a valid value acquired via
-    // `pin_into_deref()`.
+    /// Clone a reference from its reference target pointer.
+    ///
+    /// This is only available if the reference implements `Clone`.
+    ///
+    /// ## Safety
+    ///
+    /// The reference target pointer must be a valid value acquired via
+    /// `pin_into_deref()`.
     unsafe fn clone_entry(
         ent_deref: NonNull<Ref::Target>,
     ) -> Pin<Ref>
     where
         Pin<Ref>: Clone,
     {
+        // SAFETY: Delegated to caller.
         let ent_real: Pin<Ref> = unsafe { util::convert::FromDeref::pin_from_deref(ent_deref) };
 
         // Prevent `ent_real` from being dropped if
         // `<Pin<Ref> as Clone>::clone()` panics and unwinds this frame (note
         // that the kernel does not unwind, yet, though). Leak it in this case,
         // to ensure tree invariants are not violated.
-        let mut ent = core::mem::ManuallyDrop::new(ent_real);
-        let r = (&mut *ent).clone();
+        let ent = core::mem::ManuallyDrop::new(ent_real);
+        let r = (*ent).clone();
         let _ent_deref = util::convert::IntoDeref::pin_into_deref(
             core::mem::ManuallyDrop::into_inner(ent),
         );
@@ -378,7 +381,7 @@ where
         mut self: Pin<&mut Self>,
         ent_target: Pin<&Ref::Target>,
     ) -> Option<CursorMut<'_, Ref, Frt>> {
-        let ent_deref = NonNull::from_ref(&*ent_target);
+        let ent_deref = util::nonnull_from_ref(&*ent_target);
         // SAFETY: `ent_deref` points to a valid allocation.
         let ent_node = unsafe { Self::to_node(ent_deref) };
 
@@ -447,8 +450,8 @@ where
         }
 
         Slot {
-            anchor: anchor,
-            slot: slot,
+            anchor,
+            slot,
             tree: self,
         }
     }
@@ -579,6 +582,7 @@ where
     /// dropping the tree. This ensures that the elements of a tree are
     /// not leaked.
     fn drop(&mut self) {
+        // SAFETY: We treat `self` as pinned unconditionally.
         let this = unsafe { Pin::new_unchecked(self) };
         this.clear();
     }
@@ -605,36 +609,38 @@ impl Node {
         }
     }
 
-    // Return a pointer to the atomic owner tag of a node.
-    //
-    // The owner tag of a node can be accessed at any time, as long as the
-    // allocation of the node does not get deallocated. That is, the owner tag
-    // can even be accessed if another part holds a mutable reference to the
-    // node. The transparent wrapper around `UnsafeCell` in an atomic guarantee
-    // that such accesses are safe.
-    //
-    // ## Safety
-    //
-    // The node pointer must refer to a valid and initialized allocation of a
-    // node.
+    /// Return a pointer to the atomic owner tag of a node.
+    ///
+    /// The owner tag of a node can be accessed at any time, as long as the
+    /// allocation of the node does not get deallocated. That is, the owner tag
+    /// can even be accessed if another part holds a mutable reference to the
+    /// node. The transparent wrapper around `UnsafeCell` in an atomic
+    /// guarantee that such accesses are safe.
+    ///
+    /// ## Safety
+    ///
+    /// The node pointer must refer to a valid and initialized allocation of a
+    /// node.
     unsafe fn owner(node: NonNull<Self>) -> *mut atomic::Atomic<usize> {
+        // SAFETY: Delegated to caller.
         unsafe { &raw mut (*node.as_ptr()).owner }
     }
 
-    // Get a node pointer from an rb-entry pointer.
-    //
-    // ## Safety
-    //
-    // The rb-entry must refer to a valid allocation inside of a node. The
-    // allocation does not have to be initialized.
+    /// Get a node pointer from an rb-entry pointer.
+    ///
+    /// ## Safety
+    ///
+    /// The rb-entry must refer to a valid allocation inside of a node. The
+    /// allocation does not have to be initialized.
     unsafe fn from_rb(rb: NonNull<kernel::bindings::rb_node>) -> NonNull<Self> {
+        // SAFETY: Delegated to caller.
         unsafe {
             NonNull::new_unchecked(
                 kernel::container_of!(
                     kernel::types::Opaque::cast_from(rb.as_ptr()),
                     Self,
                     bindings
-                ) as *mut _,
+                ).cast_mut(),
             )
         }
     }
@@ -699,12 +705,12 @@ impl core::ops::Drop for Node {
     fn drop(&mut self) {
         // SAFETY: The allocation behind `self` is valid.
         let owner = unsafe {
-            (*Node::owner(NonNull::from_mut(self))).load(atomic::Relaxed)
+            (*Node::owner(util::nonnull_from_mut(self))).load(atomic::Relaxed)
         };
         if owner != 0 {
             core::panic!(
                 "attempting drop of a claimed node: {:?}",
-                &*self as *const _,
+                core::ptr::from_ref(&*self),
             );
         }
     }
@@ -715,11 +721,11 @@ where
     Ref: Reference,
     Frt: Field<Ref>,
 {
-    // Unlink a specific node from the tree.
-    //
-    // ## Safety
-    //
-    // `ent_node` must point to a valid entry in `tree`.
+    /// Unlink a specific node from the tree.
+    ///
+    /// ## Safety
+    ///
+    /// `ent_node` must point to a valid entry in `tree`.
     unsafe fn unlink_at(
         mut tree: Pin<&mut Tree<Ref, Frt>>,
         ent_node: NonNull<Node>,
@@ -815,6 +821,7 @@ where
             self.pos = CursorPos::Empty;
         }
 
+        // SAFETY: `ent_node` is a valid entry in `tree`.
         Some((r, unsafe { Self::unlink_at(self.tree.as_mut(), ent_node) }))
     }
 
@@ -833,6 +840,7 @@ where
             self.pos = CursorPos::Empty;
         }
 
+        // SAFETY: `ent_node` is a valid entry in `tree`.
         Some((r, unsafe { Self::unlink_at(self.tree.as_mut(), ent_node) }))
     }
 
@@ -849,6 +857,7 @@ where
             return None;
         };
 
+        // SAFETY: `ent_node` is a valid entry in `tree`.
         Some(unsafe { Self::unlink_at(self.tree.as_mut(), ent_node) })
     }
 }
@@ -867,7 +876,7 @@ where
         self.move_next_try_unlink().unwrap_or_else(
             || core::panic!(
                 "attempting to unlink from an empty tree: {:?}",
-                &*self.tree as *const _,
+                core::ptr::from_ref(&*self.tree),
             ),
         )
     }
@@ -880,7 +889,7 @@ where
         self.move_prev_try_unlink().unwrap_or_else(
             || core::panic!(
                 "attempting to unlink from an empty tree: {:?}",
-                &*self.tree as *const _,
+                core::ptr::from_ref(&*self.tree),
             ),
         )
     }
@@ -889,7 +898,7 @@ where
     ///
     /// Works like [`Self::try_unlink()`] but panics if the tree is empty.
     pub fn unlink(self) -> Pin<Ref> {
-        let ptr = &*self.tree as *const _;
+        let ptr = core::ptr::from_ref(&*self.tree);
         self.try_unlink().unwrap_or_else(
             || core::panic!(
                 "attempting to unlink from an empty tree: {:?}",
@@ -925,12 +934,10 @@ where
     }
 
     fn entry_ptr(&self) -> Option<NonNull<Ref::Target>> {
-        let Some(slot) = NonNull::new(self.slot) else {
-            return None;
-        };
-        let Some(ent_rb) = NonNull::new(unsafe { *slot.as_ref() }) else {
-            return None;
-        };
+        let slot = NonNull::new(self.slot)?;
+
+        // SAFETY: `self.slot` is a valid tree entry.
+        let ent_rb = NonNull::new(unsafe { *slot.as_ref() })?;
 
         // SAFETY: `ent_rb` refers to a valid rb-entry in the tree, and is thus
         //     embedded in a valid node.
@@ -963,12 +970,11 @@ where
     where
         Pin<Ref>: Clone,
     {
-        match self.entry_ptr() {
-            None => None,
+        self.entry_ptr().map(|v| {
             // SAFETY: `v` is a valid tree entry, and as such was acquired via
             //     `pin_into_deref()`.
-            Some(v) => Some(unsafe { Tree::<Ref, Frt>::clone_entry(v) }),
-        }
+            unsafe { Tree::<Ref, Frt>::clone_entry(v) }
+        })
     }
 
     /// Try linking a new entry in this slot.
@@ -999,13 +1005,13 @@ where
         // form. To prevent leaking the value, we have to ensure to reverse
         // this via `pin_from_deref()` on error, or when unlinking the entry
         // from the tree.
-        //
+        let ent_deref = util::convert::IntoDeref::pin_into_deref(ent);
         // SAFETY: `ping_into_deref()` guarantees that the yielded pointer is
         //     convertible to a shared reference.
-        let ent_deref = util::convert::IntoDeref::pin_into_deref(ent);
         let ent_node = unsafe { Tree::<Ref, Frt>::to_node(ent_deref) };
 
         let owner = self.tree.as_mut().as_owner();
+        // SAFETY: `ent_node` is a valid node.
         let Ok(_) = (unsafe {
             (*Node::owner(ent_node)).cmpxchg(0, owner, atomic::Acquire)
         }) else {
@@ -1068,7 +1074,7 @@ where
         if !self.available() {
             core::panic!(
                 "attempting to link on a used slot: {:?}",
-                &*self.tree as *const _,
+                core::ptr::from_ref(&*self.tree),
             );
         }
         match self.try_link(ent) {
