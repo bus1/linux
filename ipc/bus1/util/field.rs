@@ -17,13 +17,20 @@ use kernel::prelude::*;
 /// subject to this condition.
 ///
 /// Commonly, this trait is automatically implemented on Field Representing
-/// Types (FRTs) by the compiler, or manually via [`unsafe_impl_field`].
+/// Types (FRTs) by the compiler, or manually via [`impl_field`].
 ///
 /// ## Safety
 ///
-/// Implementing this type is only safe, if, and only if, for a given valid
-/// value of type [`Self::Base`] there exists a valid value of type
-/// [`Self::Type`] at byte offset `OFFSET`.
+/// Implementing this type is only safe, if for a given valid value of type
+/// [`Self::Base`] there exists a valid value of type [`Self::Type`] at byte
+/// offset `OFFSET`, and this value is represented by a direct member field
+/// on [`Self::Base`].
+///
+/// Furthermore, implementing types must not exhibit any subtype relationship.
+/// In particular, if this is implemented on a type using generics, the type
+/// must be invariant over each generic parameter. If other subtype
+/// relationships are used (e.g., universal lifetimes, `Fn*` traits with
+/// lifetimes), those must not be reflected in the implementing type.
 pub unsafe trait Field: Send + Sync + Copy {
     /// Base containing type this field exists in.
     type Base;
@@ -49,39 +56,47 @@ pub unsafe trait PinField: Field {
 /// Reflection metadata about a field of a base type.
 ///
 /// This type is used as implementing type for generated [`Field`]
-/// implementations. It is a ZST and used only to represent reflection metadata
-/// about a field of a type.
+/// implementations. It is a 1-ZST and used only to represent reflection
+/// metadata about a field of a type.
 ///
 /// See [`impl_field`] for its main user.
+///
+/// This type is invariant over all its type parameters.
 ///
 /// ## Limitations
 ///
 /// If multiple zero-sized member fields share the same offset, only a single
 /// one can be represented with this type. The compiler generated alternative
 /// in the standard library can circumvent this limitation. Without compiler
-/// support, this cannot be auto-generated. Hence, this uses the field offset
-/// as distinguisher, rather than introducing caller provided enumerations.
+/// support, auto-generation of such types requires other external enumerations
+/// that make usage needlessly complex. Hence, this uses the field offset
+/// as distinguisher, and this limits implementations.
+#[repr(C, packed)]
 pub struct FieldRepr<Base: ?Sized, Type: ?Sized, const OFFSET: usize> {
-    _base: core::marker::PhantomData<Base>,
-    _type: core::marker::PhantomData<Type>,
-    _offset: core::marker::PhantomData<[(); OFFSET]>,
+    _base: [*mut Base; 0],
+    _type: [*mut Type; 0],
+    _offset: [(); OFFSET],
 }
 
 // SAFETY: `FieldRepr` doesn't contain any values.
-unsafe impl<Base: ?Sized, Type, const OFFSET: usize> Send for FieldRepr<Base, Type, OFFSET> {
+unsafe impl<Base: ?Sized, Type: ?Sized, const OFFSET: usize> Send
+for FieldRepr<Base, Type, OFFSET> {
 }
 
 // SAFETY: `FieldRepr` doesn't contain any values.
-unsafe impl<Base: ?Sized, Type, const OFFSET: usize> Sync for FieldRepr<Base, Type, OFFSET> {
+unsafe impl<Base: ?Sized, Type: ?Sized, const OFFSET: usize> Sync
+for FieldRepr<Base, Type, OFFSET> {
 }
 
-impl<Base: ?Sized, Type, const OFFSET: usize> Copy for FieldRepr<Base, Type, OFFSET> {
-}
-
-impl<Base: ?Sized, Type, const OFFSET: usize> Clone for FieldRepr<Base, Type, OFFSET> {
+impl<Base: ?Sized, Type: ?Sized, const OFFSET: usize> Clone
+for FieldRepr<Base, Type, OFFSET> {
     fn clone(&self) -> Self {
         *self
     }
+}
+
+impl<Base: ?Sized, Type: ?Sized, const OFFSET: usize> Copy
+for FieldRepr<Base, Type, OFFSET> {
 }
 
 /// Turn a base pointer into a member field pointer.
@@ -134,8 +149,24 @@ where
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! util_field_unsafe_impl_field {
+macro_rules! util_field_frt {
     ($base:ty, $field:ident, $type:ty $(,)?) => {
+        $crate::util::field::FieldRepr<
+            $base,
+            $type,
+            { ::core::mem::offset_of!($base, $field) },
+        >
+    }
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! util_field_impl_field {
+    ($base:ty, $field:ident, $type:ty $(,)?) => {
+        // SAFETY: `FieldRepr` exposes no variance. `$field` is verified to be
+        //     a member of `$base` via `offset_of!()`, and correctness of its
+        //     type is verified apart from coercions (which is delegated to the
+        //     caller).
         unsafe impl $crate::util::field::Field
         for $crate::util::field::FieldRepr<
             $base,
@@ -158,9 +189,10 @@ macro_rules! util_field_unsafe_impl_field {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! util_field_unsafe_impl_pin_field {
+macro_rules! util_field_impl_pin_field {
     ($base:ty, $field:ident, $type:ty $(,)?) => {
-        $crate::util::field::unsafe_impl_field!($base, $field, $type);
+        $crate::util::field::impl_field!($base, $field, $type);
+        // SAFETY: Structural pinning of `$field` is guaranteed by the caller.
         unsafe impl $crate::util::field::PinField
         for $crate::util::field::FieldRepr<
             $base,
@@ -175,11 +207,7 @@ macro_rules! util_field_unsafe_impl_pin_field {
 #[macro_export]
 macro_rules! util_field_field_of {
     ($base:ty, $field:ident $(,)?) => {
-        $crate::util::field::FieldRepr<
-            $base,
-            _,
-            { ::core::mem::offset_of!($base, $field) },
-        >
+        $crate::util::field::frt!{$base, $field, _}
     }
 }
 
@@ -187,13 +215,21 @@ macro_rules! util_field_field_of {
 #[macro_export]
 macro_rules! util_field_typed_field_of {
     ($base:ty, $field:ident, $type:ty $(,)?) => {
-        $crate::util::field::FieldRepr<
-            $base,
-            $type,
-            { ::core::mem::offset_of!($base, $field) },
-        >
+        $crate::util::field::frt!{$base, $field, $type}
     }
 }
+
+/// Resolve to the field-representing-type (FRT).
+///
+/// This takes as arguments:
+/// - $base:ty
+/// - $field:ident
+/// - $type:ty
+///
+/// This resolves to `FieldRepr<$base, $type, ...>` with the last generic
+/// parameter set to the offset of `$field` in `$base`.
+#[doc(inline)]
+pub use util_field_frt as frt;
 
 /// Implement [`Field`] for a specific member field.
 ///
@@ -207,24 +243,23 @@ macro_rules! util_field_typed_field_of {
 ///
 /// ## Safety
 ///
-/// The caller must guarantee that $base is a type with a member field named
-/// $field of type $type. This macro catches most mistakes, but it is still
-/// possible to call it with incorrect information. Hence, it is the caller's
-/// responsibility to ensure the safety guarantees of [`Field`].
+/// The caller must guarantee that `$type` matches the type of the member 
+/// field `$field`. This is verified by this macro, except for possible
+/// coercions.
 #[doc(inline)]
-pub use util_field_unsafe_impl_field as unsafe_impl_field;
+pub use util_field_impl_field as impl_field;
 
 /// Implement [`PinField`] for a structurally pinned member field.
 ///
-/// This works like [`unsafe_impl_field!`] but implements [`PinField`] on top.
+/// This works like [`impl_field!`] but implements [`PinField`] on top.
 /// of [`Field`].
 ///
 /// ## Safety
 ///
-/// The safety requirements of [`unsafe_impl_field!`] apply. On top, the caller
+/// The safety requirements of [`impl_field!`] apply. On top, the caller
 /// must guarantee the field in question is structurally pinned.
 #[doc(inline)]
-pub use util_field_unsafe_impl_pin_field as unsafe_impl_pin_field;
+pub use util_field_impl_pin_field as impl_pin_field;
 
 /// Resolve to the [`FieldRepr`] of a specific member field.
 ///
@@ -263,9 +298,9 @@ mod test {
         c: u32,
     }
 
-    unsafe_impl_field!(Test, a, u16);
-    unsafe_impl_field!(Test, b, u8);
-    unsafe_impl_pin_field!(Test, c, u32);
+    impl_field!(Test, a, u16);
+    impl_field!(Test, b, u8);
+    impl_pin_field!(Test, c, u32);
 
     // Basic functionality tests for `Field` and its utilities.
     #[test]
@@ -283,5 +318,16 @@ mod test {
         assert!(core::ptr::eq(o_p, b_p));
         assert_eq!(*f_r, 11);
         assert_eq!(b_r.b, 11);
+    }
+
+    // Verify that unsized types can be used with fields.
+    #[test]
+    fn field_unsized() {
+        fn _unused<Frt0, Frt1>()
+        where
+            Frt0: Field<Base = [u8], Type = [u8]>,
+            Frt1: PinField<Base = [u8], Type = [u8]>,
+        {
+        }
     }
 }
