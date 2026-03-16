@@ -9,6 +9,7 @@ use kernel::sync::Arc;
 
 pub mod convert;
 pub mod field;
+pub mod rb;
 
 /// Convert an Arc to its pinned version.
 ///
