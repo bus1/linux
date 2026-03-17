@@ -534,6 +534,26 @@ impl Acct {
         }
     }
 
+    /// Turn the reference into a raw pointer.
+    ///
+    /// This will leak the reference and any pinned resources, unless the
+    /// original object is recreated via `Self::from_raw()`.
+    fn into_raw(this: Arc<Self>) -> *mut capi::b1_acct {
+        Arc::into_raw(this).cast_mut().cast()
+    }
+
+    /// Recreate the reference from its raw pointer.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must guarantee this pointer was acquired via
+    /// `Self::into_raw()`, and they must refrain from using the pointer any
+    /// further.
+    unsafe fn from_raw(this: *mut capi::b1_acct) -> Arc<Self> {
+        // SAFETY: Delegated to caller.
+        unsafe { Arc::from_raw(this.cast::<Self>()) }
+    }
+
     /// Get a user object for a given user ID.
     ///
     /// Query the accounting system for the user object of the given user ID.
@@ -609,6 +629,26 @@ impl Actor {
         )
     }
 
+    /// Turn the reference into a raw pointer.
+    ///
+    /// This will leak the reference and any pinned resources, unless the
+    /// original object is recreated via `Self::from_raw()`.
+    fn into_raw(this: Arc<Self>) -> *mut capi::b1_acct_actor {
+        Arc::into_raw(this).cast_mut().cast()
+    }
+
+    /// Recreate the reference from its raw pointer.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must guarantee this pointer was acquired via
+    /// `Self::into_raw()`, and they must refrain from using the pointer any
+    /// further.
+    unsafe fn from_raw(this: *mut capi::b1_acct_actor) -> Arc<Self> {
+        // SAFETY: Delegated to caller.
+        unsafe { Arc::from_raw(this.cast::<Self>()) }
+    }
+
     // Return the memory address of the actor as integer.
     //
     // The same value can be obtained via `(&raw const *actor).addr()`. Note
@@ -641,6 +681,31 @@ impl UserRef {
         Self {
             arc: ManuallyDrop::new(arc),
         }
+    }
+
+    /// Turn the reference into a raw pointer.
+    ///
+    /// This will leak the reference and any pinned resources, unless the
+    /// original object is recreated via `Self::from_raw()`.
+    fn into_raw(mut this: Self) -> *mut capi::b1_acct_user {
+        // SAFETY: The drop-handler is skipped if we leak the value, which
+        //     we do here. We also do not expose access to the refcount, so
+        //     either the value is leaked, or recreated via `Self::from_raw()`.
+        let arc = unsafe { ManuallyDrop::take(&mut this.arc) };
+        core::mem::forget(this);
+        Arc::into_raw(arc).cast_mut().cast()
+    }
+
+    /// Recreate the reference from its raw pointer.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must guarantee this pointer was acquired via
+    /// `Self::into_raw()`, and they must refrain from using the pointer any
+    /// further.
+    unsafe fn from_raw(this: *mut capi::b1_acct_user) -> Self {
+        // SAFETY: Delegated to caller.
+        Self::new(unsafe { Arc::from_raw(this.cast()) })
     }
 
     fn charge_claims(
@@ -1031,29 +1096,29 @@ impl TraceRef {
         }
     }
 
-    /// Turn the trace reference into a raw pointer.
+    /// Turn the reference into a raw pointer.
     ///
-    /// This will leak the trace and any pinned resources, unless the original
-    /// trace object is recreated via `Self::from_raw()`.
-    fn into_raw(mut this: Self) -> *mut Trace {
+    /// This will leak the reference and any pinned resources, unless the
+    /// original object is recreated via `Self::from_raw()`.
+    fn into_raw(mut this: Self) -> *mut capi::b1_acct_trace {
         // SAFETY: The drop-handler can be skipped if we leak the value, which
         //     we do here. We also do not expose access to the refcount, so
         //     either the value is leaked, or recreated via `Self::from_raw()`.
         let arc = unsafe { ManuallyDrop::take(&mut this.arc) };
         core::mem::forget(this);
-        Arc::into_raw(arc).cast_mut()
+        Arc::into_raw(arc).cast_mut().cast()
     }
 
-    /// Recreate the trace reference from its raw pointer.
+    /// Recreate the reference from its raw pointer.
     ///
     /// ## Safety
     ///
     /// The caller must guarantee this pointer was acquired via
     /// `Self::into_raw()`, and they must refrain from using the pointer any
     /// further.
-    unsafe fn from_raw(trace: *mut Trace) -> Self {
+    unsafe fn from_raw(trace: *mut capi::b1_acct_trace) -> Self {
         // SAFETY: Delegated to caller.
-        Self::new(unsafe { Arc::from_raw(trace) })
+        Self::new(unsafe { Arc::from_raw(trace.cast()) })
     }
 
     fn discharge(&self, amount: &[Value; N_SLOTS]) {
@@ -1282,6 +1347,362 @@ impl Charge {
 impl core::ops::Drop for Charge {
     fn drop(&mut self) {
         self.discharge();
+    }
+}
+
+/// Create a new accounting system.
+///
+/// This is the C API for [`Arc::new()`]. It returns an error pointer for
+/// `ENOMEM`, or a valid reference to the newly created [`Acct`] object.
+///
+/// ## Safety
+///
+/// `maxima` must be convertible to a shared reference.
+#[export_name = "b1_acct_new"]
+pub unsafe extern "C" fn acct_new(
+    maxima: *const [Value; N_SLOTS],
+) -> *mut capi::b1_acct {
+    // SAFETY: Delegated to caller.
+    match Acct::new(unsafe { &*maxima }) {
+        Ok(v) => Acct::into_raw(v),
+        Err(AllocError) => Error::from_errno(capi::B1_ACCT_ERROR_OOM).to_ptr(),
+    }
+}
+
+/// Create a new reference to an accounting system.
+///
+/// This increases the reference count of the accounting system by one. If
+/// `NULL` is passed, this is a no-op.
+///
+/// This always returns back the same pointer as was passed.
+///
+/// ## Safety
+///
+/// If non-NULL, `acct` must refer to a valid accounting system and the caller
+/// must hold a reference to it.
+#[export_name = "b1_acct_ref"]
+pub unsafe extern "C" fn acct_ref(
+    this: *mut capi::b1_acct,
+) -> *mut capi::b1_acct {
+    if let Some(this_nn) = core::ptr::NonNull::new(this) {
+        // Ensure `this_ref` is not dropped on panic.
+        let this_ref = ManuallyDrop::new(
+            // SAFETY: Delegated to caller.
+            unsafe { Acct::from_raw(this_nn.as_ptr()) }
+        );
+        let r = (*this_ref).clone();
+        let _ = Acct::into_raw(ManuallyDrop::into_inner(this_ref));
+        Acct::into_raw(r)
+    } else {
+        this
+    }
+}
+
+/// Drop a reference to an accounting system.
+///
+/// This decreases the reference count of the accounting system by one. If
+/// `NULL` is passed, this is a no-op. If this drops the last reference, the
+/// entire accounting system is deallocated.
+///
+/// Note that actors and users also own a reference to the accounting system.
+///
+/// This always returns `NULL`.
+///
+/// ## Safety
+///
+/// If non-NULL, `acct` must refer to a valid accounting system and the caller
+/// must hold a reference to it.
+#[export_name = "b1_acct_unref"]
+pub unsafe extern "C" fn acct_unref(
+    this: *mut capi::b1_acct,
+) -> *mut capi::b1_acct {
+    if let Some(this_nn) = core::ptr::NonNull::new(this) {
+        // SAFETY: Delegated to caller.
+        let _ = unsafe { Acct::from_raw(this_nn.as_ptr()) };
+    }
+    core::ptr::null_mut()
+}
+
+/// Create a new actor for a given user.
+///
+/// This always creates a new actor, which will act on behalf of the given
+/// user.
+///
+/// This can return `ENOMEM` as error pointer on failure.
+///
+/// ## Safety
+///
+/// `user` must refer to a valid user and the caller must hold a reference
+/// to it.
+#[export_name = "b1_acct_actor_new"]
+pub unsafe extern "C" fn actor_new(
+    user: *mut capi::b1_acct_user,
+) -> *mut capi::b1_acct_actor {
+    let user_nn = core::ptr::NonNull::new(user).unwrap();
+    // Ensure `user_ref` is not dropped on panic.
+    let user_ref = ManuallyDrop::new(
+        // SAFETY: Delegated to caller.
+        unsafe { UserRef::from_raw(user_nn.as_ptr()) }
+    );
+    let r = match Actor::with((*user_ref).clone()) {
+        Ok(v) => Actor::into_raw(v),
+        Err(AllocError) => Error::from_errno(capi::B1_ACCT_ERROR_OOM).to_ptr(),
+    };
+    let _ = UserRef::into_raw(ManuallyDrop::into_inner(user_ref));
+    r
+}
+
+/// Create a new reference to an actor.
+///
+/// This increases the reference count of the actor by one. If `NULL` is
+/// passed, this is a no-op.
+///
+/// This always returns back the same pointer as was passed.
+///
+/// ## Safety
+///
+/// If non-NULL, `actor` must refer to a valid actor and the caller must hold a
+/// reference to it.
+#[export_name = "b1_acct_actor_ref"]
+pub unsafe extern "C" fn actor_ref(
+    this: *mut capi::b1_acct_actor,
+) -> *mut capi::b1_acct_actor {
+    if let Some(this_nn) = core::ptr::NonNull::new(this) {
+        // Ensure `this_arc` is not dropped on panic.
+        let this_ref = ManuallyDrop::new(
+            // SAFETY: Delegated to caller.
+            unsafe { Actor::from_raw(this_nn.as_ptr()) }
+        );
+        let r = (*this_ref).clone();
+        let _ = Actor::into_raw(ManuallyDrop::into_inner(this_ref));
+        Actor::into_raw(r)
+    } else {
+        this
+    }
+}
+
+/// Drop a reference to an actor.
+///
+/// This decreases the reference count of the actor by one. If `NULL` is
+/// passed, this is a no-op. If this drops the last reference, the
+/// entire actor is deallocated.
+///
+/// This always returns `NULL`.
+///
+/// ## Safety
+///
+/// If non-NULL, `actor` must refer to a valid actor and the caller must hold a
+/// reference to it.
+#[export_name = "b1_acct_actor_unref"]
+pub unsafe extern "C" fn actor_unref(
+    this: *mut capi::b1_acct_actor,
+) -> *mut capi::b1_acct_actor {
+    if let Some(this_nn) = core::ptr::NonNull::new(this) {
+        // SAFETY: Delegated to caller.
+        let _ = unsafe { Actor::from_raw(this_nn.as_ptr()) };
+    }
+    core::ptr::null_mut()
+}
+
+/// Charge an actor.
+///
+/// Charge the actor `this` for the resource amount given in `amount`. The
+/// claimant actor is given as `claimant`. The charge is recorded in `charge`.
+///
+/// If `charge` is already used, this will return `EINVAL`. If the user quota
+/// is exceeded, this will return `EDQUOT`. If the actor quota is exceeded,
+/// this will return `EXFULL`.
+///
+/// ## Safety
+///
+/// `this` must refer to a valid actor and the caller must hold a reference
+/// to it.
+///
+/// `claimant` must refer to a valid actor and the caller must hold a reference
+/// to it.
+///
+/// `charge` must refer to an initialized and valid charge object.
+///
+/// `amount` must refer to a valid array of charge values.
+#[export_name = "b1_acct_actor_charge"]
+pub unsafe extern "C" fn actor_charge(
+    this: *mut capi::b1_acct_actor,
+    charge: *mut capi::b1_acct_charge,
+    claimant: *mut capi::b1_acct_actor,
+    amount: *const [Value; N_SLOTS],
+) -> c_int {
+    let this_nn = core::ptr::NonNull::new(this).unwrap();
+    let charge_nn = core::ptr::NonNull::new(charge).unwrap();
+    let claimant_nn = core::ptr::NonNull::new(claimant).unwrap();
+    let amount_nn = core::ptr::NonNull::new(amount.cast_mut()).unwrap();
+
+    // Ensure `this_ref` is not dropped on panic.
+    let this_ref = ManuallyDrop::new(
+        // SAFETY: Delegated to caller.
+        unsafe { Actor::from_raw(this_nn.as_ptr()) }
+    );
+    // Ensure `claimant_ref` is not dropped on panic.
+    let claimant_ref = ManuallyDrop::new(
+        // SAFETY: Delegated to caller.
+        unsafe { Actor::from_raw(claimant_nn.as_ptr()) }
+    );
+    // SAFETY: Delegated to caller.
+    let charge_ref = unsafe { Charge::from_capi(charge_nn.as_ptr()) };
+    // SAFETY: Delegated to caller.
+    let amount_ref = unsafe { amount_nn.as_ref() };
+
+    let r = if !charge_ref.inner.trace.is_null() {
+        capi::B1_ACCT_ERROR_INVALID
+    } else {
+        match this_ref.as_arc_borrow().charge(
+            claimant_ref.as_arc_borrow(),
+            amount_ref,
+        ) {
+            Ok(mut v) => {
+                core::mem::swap(&mut v, charge_ref);
+                0
+            },
+            Err(ChargeError::Alloc(AllocError)) => {
+                capi::B1_ACCT_ERROR_OOM
+            },
+            Err(ChargeError::UserQuota) => {
+                capi::B1_ACCT_ERROR_USER_QUOTA
+            },
+            Err(ChargeError::ActorQuota) => {
+                capi::B1_ACCT_ERROR_ACTOR_QUOTA
+            },
+        }
+    };
+
+    let _ = Actor::into_raw(ManuallyDrop::into_inner(claimant_ref));
+    let _ = Actor::into_raw(ManuallyDrop::into_inner(this_ref));
+    r
+}
+
+/// Get a user object from an accounting system.
+///
+/// This either creates a new user object, or returns the existing user object
+/// for the given ID in this accounting system.
+///
+/// This can return `ENOMEM` as error pointer on failure.
+///
+/// ## Safety
+///
+/// `acct` must refer to a valid accounting system and the caller must hold
+/// a reference to it.
+#[export_name = "b1_acct_get_user"]
+pub unsafe extern "C" fn acct_get_user(
+    this: *mut capi::b1_acct,
+    id: Id,
+) -> *mut capi::b1_acct_user {
+    let this_nn = core::ptr::NonNull::new(this).unwrap();
+    // Ensure `this_ref` is not dropped on panic.
+    let this_ref = ManuallyDrop::new(
+        // SAFETY: Delegated to caller.
+        unsafe { Acct::from_raw(this_nn.as_ptr()) }
+    );
+    let r = match this_ref.as_arc_borrow().get_user(id) {
+        Ok(v) => UserRef::into_raw(v),
+        Err(AllocError) => Error::from_errno(capi::B1_ACCT_ERROR_OOM).to_ptr(),
+    };
+    let _ = Acct::into_raw(ManuallyDrop::into_inner(this_ref));
+    r
+}
+
+/// Create a new reference to a user.
+///
+/// This increases the reference count of the user by one. If `NULL` is
+/// passed, this is a no-op.
+///
+/// This always returns back the same pointer as was passed.
+///
+/// ## Safety
+///
+/// If non-NULL, `user` must refer to a valid user and the caller must hold a
+/// reference to it.
+#[export_name = "b1_acct_user_ref"]
+pub unsafe extern "C" fn user_ref(
+    this: *mut capi::b1_acct_user,
+) -> *mut capi::b1_acct_user {
+    if let Some(this_nn) = core::ptr::NonNull::new(this) {
+        // Ensure `this_ref` is not dropped on panic.
+        let this_ref = ManuallyDrop::new(
+            // SAFETY: Delegated to caller.
+            unsafe { UserRef::from_raw(this_nn.as_ptr()) }
+        );
+        let r = (*this_ref).clone();
+        let _ = UserRef::into_raw(ManuallyDrop::into_inner(this_ref));
+        UserRef::into_raw(r)
+    } else {
+        this
+    }
+}
+
+/// Drop a reference to a user.
+///
+/// This decreases the reference count of the user by one. If `NULL` is
+/// passed, this is a no-op. If this drops the last reference, the
+/// entire user is deallocated.
+///
+/// This always returns `NULL`.
+///
+/// ## Safety
+///
+/// If non-NULL, `user` must refer to a valid user and the caller must hold a
+/// reference to it.
+#[export_name = "b1_acct_user_unref"]
+pub unsafe extern "C" fn user_unref(
+    this: *mut capi::b1_acct_user,
+) -> *mut capi::b1_acct_user {
+    if let Some(this_nn) = core::ptr::NonNull::new(this) {
+        // SAFETY: Delegated to caller.
+        let _ = unsafe { UserRef::from_raw(this_nn.as_ptr()) };
+    }
+    core::ptr::null_mut()
+}
+
+/// Initialize a charge object.
+///
+/// This initializes the possibly uninitialized charge object. Any previous
+/// value is leaked and replaced.
+///
+/// On return, the charge object will be cleared and contain no charge. Any
+/// discharge operation will thus be a no-op, unless the object is charged
+/// in between.
+///
+/// ## Safety
+///
+/// `this` must refer to a charge object, but can be uninitialized.
+#[export_name = "b1_acct_charge_init"]
+pub unsafe extern "C" fn charge_init(
+    this: *mut capi::b1_acct_charge,
+) {
+    let this_nn = core::ptr::NonNull::new(this).unwrap();
+    unsafe {
+        this_nn.write(capi::b1_acct_charge {
+            trace: core::ptr::null_mut(),
+            amount: [0; _],
+        });
+    }
+}
+
+/// Deinitialize a charge object.
+///
+/// This deinitializes a charge object. Any charged are discharged and the
+/// object is put into a freshly initialized state, ready to be re-used or
+/// dropped.
+///
+/// ## Safety
+///
+/// `this` must refer to a valid charge object.
+#[export_name = "b1_acct_charge_deinit"]
+pub unsafe extern "C" fn charge_deinit(
+    this: *mut capi::b1_acct_charge,
+) {
+    let this_nn = core::ptr::NonNull::new(this).unwrap();
+    // SAFETY: Delegated to caller.
+    unsafe {
+        Charge::from_capi(this_nn.as_ptr()).discharge();
     }
 }
 
