@@ -284,12 +284,17 @@ where
     // Return the memory address of this tree as an integer. This is used to
     // tag nodes belonging to this tree.
     //
-    // Due to pinning, the tree cannot move and its address stays constant. And
-    // due to its drop-handler, all linked nodes are cleared before a tree is
-    // deallocated. Therefore, it is save to use its address as tag.
-    fn as_owner(self: Pin<&mut Self>) -> usize {
-        // SAFETY: Acquiring a raw pointer violates no `Pin` invariants.
-        unsafe { &raw mut *Pin::into_inner_unchecked(self) as usize }
+    // Note that the address of a tree is only stable if the tree is pinned.
+    // Since all modifications to a tree take a `Pin<&mut Self>`, this is
+    // given. We avoid taking a pinned tree here, to allow read-only queries to
+    // work with `&self` for simpler APIs. It is up to the caller to ensure
+    // that the result is used coherently.
+    //
+    // Also note that the drop handler of a tree ensures all entries are
+    // unlinked before a tree is unpinned. Therefore, owner tags are usually
+    // never used longer than a tree is pinned.
+    fn as_owner(&self) -> usize {
+        util::ptr_addr(core::ptr::from_ref(self))
     }
 
     fn root_mut(self: Pin<&mut Self>) -> &mut kernel::bindings::rb_root {

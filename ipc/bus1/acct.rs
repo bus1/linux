@@ -657,7 +657,7 @@ impl Actor {
     fn addr(self: ArcBorrow<'_, Self>) -> usize {
         // In the kernel, `Arc` is always pinned, so the address can be used as
         // stable indicator for this actor.
-        (&raw const *self).cast::<()>() as usize
+        util::ptr_addr(core::ptr::from_ref(&*self))
     }
 
     /// Charge resources on the user of this actor with the given claimant
