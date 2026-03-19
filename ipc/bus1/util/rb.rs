@@ -1094,15 +1094,15 @@ mod test {
         rb: Node,
     }
 
-    util::field::impl_pin_field!(Entry, rb, Node);
+    impl_pin_node!(Entry, rb);
 
     #[test]
     fn test_basic() {
-        let e0 = pin::pin!(Entry { key: 0, ..Default::default() });
-        let e1 = pin::pin!(Entry { key: 1, ..Default::default() });
+        let e0 = core::pin::pin!(Entry { key: 0, ..Default::default() });
+        let e1 = core::pin::pin!(Entry { key: 1, ..Default::default() });
 
         let tree_o: Tree<&Entry, util::field::field_of!(Entry, rb)> = Tree::new();
-        let mut tree: Pin<&mut Tree<_, _>> = pin::pin!(tree_o);
+        let mut tree: Pin<&mut Tree<_, _>> = core::pin::pin!(tree_o);
 
         assert!(tree.as_mut().is_empty());
         tree.as_mut().find_slot_by(|other| e0.key.cmp(&other.key))
