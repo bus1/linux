@@ -34,8 +34,10 @@ use crate::util;
 /// ## Safety
 ///
 /// The implementations of [`Deref`](core::ops::Deref) and [`IntoDeref`] must
-/// be compatible. That is, for a given instance, both must agree on what
-/// object a deref resolves to.
+/// be compatible. That is, `deref()` must return the same pointer as
+/// `into_deref()`. If [`DerefMut`] is implemented, `deref_mut()` must also
+/// return the same pointer. Both must be replaceable by taking the raw pointer
+/// and converting it to a matching reference.
 ///
 /// Furthermore, for types that provide [pinned](core::pin) variants,
 /// [`IntoDeref`] is part of the safety requirements of
@@ -78,8 +80,9 @@ pub unsafe trait IntoDeref: Sized + core::ops::Deref {
 /// ## Safety
 ///
 /// The implementations of [`Deref`](core::ops::Deref) and [`FromDeref`] must
-/// be compatible. That is, for a given instance, both must agree on what
-/// object a deref resolves to.
+/// be compatible. That is, `deref()` must return the same pointer as
+/// `from_deref()` takes. If [`DerefMut`] is implemented, `deref_mut()` must
+/// also return the same pointer.
 ///
 /// Furthermore, for types that provide [pinned](core::pin) variants,
 /// [`FromDeref`] is part of the safety requirements of
