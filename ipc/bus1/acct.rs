@@ -438,7 +438,7 @@ unsafe fn find_or_insert<T, Frt, CmpFn, NewFn>(
     mut new_fn: NewFn,
 ) -> Result<Arc<T>, AllocError>
 where
-    Frt: rb::Field<Arc<T>>,
+    Frt: util::intrusive::Field<Arc<T>, Node = rb::Node>,
     CmpFn: FnMut(Pin<&T>) -> core::cmp::Ordering,
     NewFn: FnMut() -> Result<Arc<T>, AllocError>,
 {
@@ -473,7 +473,7 @@ fn drop_or_unlink<T, Frt>(
     ent: Arc<T>,
 ) -> Option<Arc<T>>
 where
-    Frt: rb::Field<Arc<T>>,
+    Frt: util::intrusive::Field<Arc<T>, Node = rb::Node>,
 {
     let ent = util::arc_pin(Arc::drop_unless_unique(ent)?);
 

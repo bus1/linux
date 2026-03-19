@@ -30,37 +30,6 @@ use kernel::sync::atomic;
 
 use crate::util;
 
-/// Trait alias for reference types in an RB-Tree.
-///
-/// This trait is used as trait-alias for the combination of
-/// [`IntoDeref`](crate::util::convert::IntoDeref) and
-/// [`FromDeref`](crate::util::convert::FromDeref). Note that both those
-/// traits imply [`Deref`](core::ops::Deref) and [`Sized`].
-///
-/// This trait is auto-implemented for all qualifying types.
-pub trait Reference
-where
-    Self: util::convert::IntoDeref,
-    Self: util::convert::FromDeref,
-{
-}
-
-/// Trait alias for field-representing-types in an RB-Tree.
-///
-/// This trait is used as trait-alias for the combination of a reference
-/// type (see [`rb::Reference`](Reference)) and a pinned
-/// field-representing-type
-/// [`PinField`](crate::util::field::PinField) with [`Node`] as member
-/// field type.
-///
-/// This trait is auto-implemented for all qualifying types.
-pub trait Field<Ref>
-where
-    Self: util::field::PinField<Base = Ref::Target, Type = Node>,
-    Ref: Reference,
-{
-}
-
 /// Red-Black Tree that stores and manages elements.
 ///
 /// A [`Tree`] can be used to link and unlink elements, and thus transfer
@@ -82,8 +51,8 @@ where
 /// multiple different trees simultaneously.
 pub struct Tree<Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     // Rb-tree metadata for the entire tree. In their most basic form, this is
     // just a pointer to the root node (but caching variants are an option to
@@ -151,8 +120,8 @@ enum CursorPos {
 /// be inserted and removed at will.
 pub struct CursorMut<'tree, Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     tree: Pin<&'tree mut Tree<Ref, Frt>>,
     pos: CursorPos,
@@ -170,8 +139,8 @@ where
 /// of new elements into the tree.
 pub struct Slot<'tree, Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     tree: Pin<&'tree mut Tree<Ref, Frt>>,
     anchor: *mut kernel::bindings::rb_node,
@@ -182,11 +151,7 @@ where
 #[macro_export]
 macro_rules! util_rb_impl_pin_node {
     ($base:ty, $field:ident $(,)?) => {
-        $crate::util::field::impl_pin_field!{
-            $base,
-            $field,
-            $crate::util::rb::Node,
-        }
+        $crate::util::field::impl_pin_field!{$base, $field, $crate::util::rb::Node}
     }
 }
 
@@ -194,61 +159,24 @@ macro_rules! util_rb_impl_pin_node {
 #[macro_export]
 macro_rules! util_rb_node_of {
     ($base:ty, $field:ident $(,)?) => {
-        $crate::util::field::typed_field_of!(
-            $base,
-            $field,
-            $crate::util::rb::Node,
-        )
+        $crate::util::field::typed_field_of!{$base, $field, $crate::util::rb::Node}
     }
 }
 
-/// Implement [`PinField`] for a structurally pinned member node.
-///
-/// This works like
-/// [`impl_pin_field!`](crate::util::field::impl_pin_field)
-/// but assumes the type of the field to be [`Node`].
-///
-/// ## Safety
-///
-/// The safety requirements of
-/// [`impl_pin_field!`](crate::util::field::impl_pin_field)
-/// apply.
+/// Alias of [`impl_pin_field!()`](util::field::impl_pin_field) with a fixed
+/// member field type of [`Node`].
 #[doc(inline)]
 pub use util_rb_impl_pin_node as impl_pin_node;
 
-/// Resolve to the [`FieldRepr`] of a specific member node.
-///
-/// This takes as arguments:
-/// - $base:ty
-/// - $field:ident
-///
-/// This resolves to
-/// [`typed_field_of!`](crate::util::field::typed_field_of)`($base, $field, Node)`.
-/// That is, it is a version of `typed_field_of!()` with a fixed member field
-/// type of [`Node`].
+/// Alias of [`typed_field_of!()`](util::field::typed_field_of) with a fixed
+/// member field type of [`Node`].
 #[doc(inline)]
 pub use util_rb_node_of as node_of;
 
-// Blanket impl of the `Reference` alias.
-impl<Ref> Reference for Ref
-where
-    Ref: util::convert::IntoDeref,
-    Ref: util::convert::FromDeref,
-{
-}
-
-// Blanket impl of the `Field<Ref>` alias.
-impl<Frt, Ref> Field<Ref> for Frt
-where
-    Frt: util::field::PinField<Base = Ref::Target, Type = Node>,
-    Ref: Reference,
-{
-}
-
 impl<Ref, Frt> Tree<Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     /// Create a new empty tree.
     ///
@@ -300,41 +228,6 @@ where
     fn root_mut(self: Pin<&mut Self>) -> &mut kernel::bindings::rb_root {
         // SAFETY: `Self.root` is not structurally pinned.
         unsafe { &mut Pin::into_inner_unchecked(self).root }
-    }
-
-    /// Convert from reference target pointer to node pointer.
-    ///
-    /// ## Safety
-    ///
-    /// The reference target pointer must refer to a valid allocation of its
-    /// type, but does not need to be initialized.
-    unsafe fn to_node(
-        p: NonNull<Ref::Target>,
-    ) -> NonNull<Node> {
-        // SAFETY: Delegated to caller.
-        unsafe {
-            NonNull::new_unchecked(
-                util::field::field_of_ptr::<Frt>(p.as_ptr())
-            )
-        }
-    }
-
-    /// Convert from node pointer to reference target pointer.
-    ///
-    /// ## Safety
-    ///
-    /// The node pointer must refer to a valid allocation of its type embedded
-    /// in a reference target object. The allocation does not need to be
-    /// initialized.
-    unsafe fn from_node(
-        n: NonNull<Node>,
-    ) -> NonNull<Ref::Target> {
-        // SAFETY: Delegated to caller.
-        unsafe {
-            NonNull::new_unchecked(
-                util::field::base_of_ptr::<Frt>(n.as_ptr())
-            )
-        }
     }
 
     /// Clone a reference from its reference target pointer.
@@ -395,7 +288,7 @@ where
     ) -> bool {
         let ent_deref = util::nonnull_from_ref(&*ent_target);
         // SAFETY: `ent_deref` points to a valid allocation.
-        let ent_node = unsafe { Self::to_node(ent_deref) };
+        let ent_node = unsafe { Frt::to_node(ent_deref) };
         // SAFETY: `ent_node` points to a valid node.
         let v = unsafe {
             (*Node::owner(ent_node)).load(atomic::Relaxed)
@@ -413,7 +306,7 @@ where
     ) -> Option<CursorMut<'_, Ref, Frt>> {
         let ent_deref = util::nonnull_from_ref(&*ent_target);
         // SAFETY: `ent_deref` points to a valid allocation.
-        let ent_node = unsafe { Self::to_node(ent_deref) };
+        let ent_node = unsafe { Frt::to_node(ent_deref) };
 
         // SAFETY: `end_node` points to a valid allocation. Since atomics are
         //     transparent wrappers around `UnsafeCell`, they allow any kind of
@@ -459,7 +352,7 @@ where
             let ent_node = unsafe { Node::from_rb(ent_rb) };
             // SAFETY: All nodes in a tree always refer to a valid node
             //     within a reference target.
-            let ent_deref = unsafe { Self::from_node(ent_node) };
+            let ent_deref = unsafe { Frt::from_node(ent_node) };
             // SAFETY: Entries in a tree a unconditionally pinned.
             let ent_deref_r = unsafe { Pin::new_unchecked(ent_deref.as_ref()) };
 
@@ -528,7 +421,7 @@ where
             // SAFETY: `end_node` is a valid node.
             unsafe { (*Node::owner(ent_node)).store(0, atomic::Release) };
             // SAFETY: `end_node` is a valid node in a reference target.
-            let ent_deref = unsafe { Self::from_node(ent_node) };
+            let ent_deref = unsafe { Frt::from_node(ent_node) };
             // SAFETY: All reference target pointers were acquired via
             //     `pin_into_deref()`. Since we remove the entry from the tree,
             //     we guarantee it will no longer be used.
@@ -542,8 +435,8 @@ where
 // Convenience helpers
 impl<Ref, Frt> Tree<Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     /// Create a mutable cursor to an explicit element.
     ///
@@ -606,8 +499,8 @@ where
 //     the stored type.
 unsafe impl<Ref, Frt> Send for Tree<Ref, Frt>
 where
-    Ref: Send + Reference,
-    Frt: Field<Ref>,
+    Ref: Send + util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
 }
 
@@ -616,15 +509,15 @@ where
 //     the stored type.
 unsafe impl<Ref, Frt> Sync for Tree<Ref, Frt>
 where
-    Ref: Sync + Reference,
-    Frt: Field<Ref>,
+    Ref: Sync + util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
 }
 
 impl<Ref, Frt> core::default::Default for Tree<Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     /// Return a new empty tree.
     ///
@@ -637,8 +530,8 @@ where
 
 impl<Ref, Frt> core::ops::Drop for Tree<Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     /// Clear a tree before dropping it.
     ///
@@ -798,8 +691,8 @@ impl core::ops::Drop for Node {
 
 impl<'tree, Ref, Frt> CursorMut<'tree, Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     /// Unlink a specific node from the tree.
     ///
@@ -812,7 +705,7 @@ where
     ) -> Pin<Ref> {
         // SAFETY: `ent_node` is a valid tree entry, as guaranteed by the
         //     caller. It thus is embedded in a reference target type.
-        let ent_deref = unsafe { Tree::<Ref, Frt>::from_node(ent_node) };
+        let ent_deref = unsafe { Frt::from_node(ent_node) };
 
         // SAFETY: `rb_erase` only reshuffles a tree. So it is enough to
         //     ensure it is passed a valid root with only valid nodes. This
@@ -945,8 +838,8 @@ where
 // Convenience helpers
 impl<'tree, Ref, Frt> CursorMut<'tree, Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     /// Move to the next entry, unlinking the current entry first.
     ///
@@ -990,8 +883,8 @@ where
 
 impl<'tree, Ref, Frt> Slot<'tree, Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     /// Check whether the slot is available for insertion.
     ///
@@ -1024,7 +917,7 @@ where
         let ent_node = unsafe { Node::from_rb(ent_rb) };
         // SAFETY: `ent_node` refers to a valid node in the tree, and thus must
         //     be embedded in a reference target.
-        Some(unsafe { Tree::<Ref, Frt>::from_node(ent_node) })
+        Some(unsafe { Frt::from_node(ent_node) })
     }
 
     /// Get a reference to the entry in this slot.
@@ -1088,7 +981,7 @@ where
         let ent_deref = util::convert::IntoDeref::pin_into_deref(ent);
         // SAFETY: `ping_into_deref()` guarantees that the yielded pointer is
         //     convertible to a shared reference.
-        let ent_node = unsafe { Tree::<Ref, Frt>::to_node(ent_deref) };
+        let ent_node = unsafe { Frt::to_node(ent_deref) };
 
         let owner = self.tree.as_mut().as_owner();
         // SAFETY: `ent_node` is a valid node.
@@ -1143,8 +1036,8 @@ where
 // Convenience helpers
 impl<'tree, Ref, Frt> Slot<'tree, Ref, Frt>
 where
-    Ref: Reference,
-    Frt: Field<Ref>,
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
 {
     /// Link a new entry into this slot.
     ///
@@ -1181,7 +1074,7 @@ mod test {
         let e0 = core::pin::pin!(Entry { key: 0, ..Default::default() });
         let e1 = core::pin::pin!(Entry { key: 1, ..Default::default() });
 
-        let tree_o: Tree<&Entry, util::field::field_of!(Entry, rb)> = Tree::new();
+        let tree_o: Tree<&Entry, node_of!(Entry, rb)> = Tree::new();
         let mut tree: Pin<&mut Tree<_, _>> = core::pin::pin!(tree_o);
 
         assert!(tree.as_mut().is_empty());
