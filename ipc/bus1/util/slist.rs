@@ -25,7 +25,7 @@ use core::ptr::NonNull;
 use kernel::prelude::*;
 use kernel::sync::atomic;
 
-use crate::util::{self, intrusive};
+use crate::util;
 
 /// Intrusive single linked list to store elements.
 ///
@@ -109,8 +109,31 @@ where
     _list: core::marker::PhantomData<&'list mut List<Ref, Frt>>,
 }
 
-// Define `impl_pin_node!()` and `node_of!()`.
-intrusive::node_macros!(Node, util_slist_impl_pin_node, util_slist_node_of);
+#[doc(hidden)]
+#[macro_export]
+macro_rules! util_slist_impl_pin_node {
+    ($base:ty, $field:ident $(,)?) => {
+        $crate::util::field::impl_pin_field!{$base, $field, $crate::util::slist::Node}
+    }
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! util_slist_node_of {
+    ($base:ty, $field:ident $(,)?) => {
+        $crate::util::field::typed_field_of!{$base, $field, $crate::util::slist::Node}
+    }
+}
+
+/// Alias of [`impl_pin_field!()`](util::field::impl_pin_field) with a fixed
+/// member field type of [`Node`].
+#[doc(inline)]
+pub use util_slist_impl_pin_node as impl_pin_node;
+
+/// Alias of [`typed_field_of!()`](util::field::typed_field_of) with a fixed
+/// member field type of [`Node`].
+#[doc(inline)]
+pub use util_slist_node_of as node_of;
 
 // Marks the end of a list, to be able to distinguish unlinked nodes from tail
 // nodes. Since the initial page is reserved, this cannot match real nodes.
