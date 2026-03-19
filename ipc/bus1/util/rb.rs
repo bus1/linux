@@ -117,7 +117,7 @@ pub struct Node {
     // never create multiple references to a single node. With a non-owning
     // intrusive collection, we would need an `UnsafePinned` here, to ensure
     // references retained by the caller do not alias with references created
-    // during list introspection or manipulation. Yet, for owning collections
+    // during tree introspection or manipulation. Yet, for owning collections
     // this is unnecessary.
     // We still use `Opaque` over `UnsafeCell` here, since interior mutability
     // is required, and we really don't want to rely too much on the
@@ -509,7 +509,7 @@ where
     }
 }
 
-// Convenience helpers.
+// Convenience helpers
 impl<Ref, Frt> Tree<Ref, Frt>
 where
     Ref: Reference,
@@ -670,7 +670,7 @@ impl core::default::Default for Node {
     /// Return a clean and unlinked node.
     ///
     /// The default state for nodes is an unlinked state. Such nodes are in no
-    /// way tied to a list or any other node.
+    /// way tied to a tree or any other node.
     fn default() -> Self {
         Self::new()
     }
@@ -680,27 +680,27 @@ impl core::ops::Drop for Node {
     /// Drop a node and verify it is unlinked.
     ///
     /// No special cleanup is required when dropping nodes. However, linked
-    /// nodes are owned by their respective list and as such must never be
-    /// dropped. In an owning list, this cannot happen, but in non-owning lists
+    /// nodes are owned by their respective tree and as such must never be
+    /// dropped. In an owning tree, this cannot happen, but in non-owning trees
     /// it is the responsibility of the caller to ensure nodes are unlinked
     /// before they are dropped.
     ///
-    /// Since this is an owning list implementation, this drop handler is a
+    /// Since this is an owning tree implementation, this drop handler is a
     /// safety net to ensure a correct implementation.
     ///
     /// ## Background
     ///
     /// The drop handler could attempt to disassociate the node. However, this
-    /// only works if node and list are owned by the same thread. Since
+    /// only works if node and tree are owned by the same thread. Since
     /// [`Node`] was designed with [`Send`], it can be dropped by another
-    /// thread (possibly in parallel with a drop of the list). Any attempt to
+    /// thread (possibly in parallel with a drop of the tree). Any attempt to
     /// unlink would thus race.
     ///
-    /// In case of non-owning lists, neither list nor node can ensure the other
+    /// In case of non-owning trees, neither tree nor node can ensure the other
     /// is valid for even the shortest interval, and thus cannot attempt any
     /// unlink operation. Instead, validity of nodes is an invariant that must
     /// be upheld by the user, and is protected by this drop implementation. In
-    /// case of an owning list, nodes are always valid while linked, and thus
+    /// case of an owning tree, nodes are always valid while linked, and thus
     /// this drop implementation will hopefully be a no-op.
     fn drop(&mut self) {
         // SAFETY: The allocation behind `self` is valid.
@@ -862,7 +862,7 @@ where
     }
 }
 
-// Convenience helpers.
+// Convenience helpers
 impl<'tree, Ref, Frt> CursorMut<'tree, Ref, Frt>
 where
     Ref: Reference,
@@ -1016,7 +1016,7 @@ where
             (*Node::owner(ent_node)).cmpxchg(0, owner, atomic::Acquire)
         }) else {
             // If the cmpxchg fails, the entry is already claimed (either by
-            // this list or another list). Refuse to use this entry, but return
+            // this tree or another tree). Refuse to use this entry, but return
             // it fully to the caller so it can be reused.
             //
             // SAFETY: The pointer was just obtained from `pin_into_deref()`,
@@ -1060,7 +1060,7 @@ where
     }
 }
 
-// Convenience helpers.
+// Convenience helpers
 impl<'tree, Ref, Frt> Slot<'tree, Ref, Frt>
 where
     Ref: Reference,
@@ -1087,7 +1087,6 @@ where
 #[kunit_tests(bus1_util_rb)]
 mod test {
     use super::*;
-    use core::pin;
 
     #[derive(Default)]
     struct Entry {
