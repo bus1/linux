@@ -10,6 +10,7 @@ use kernel::sync::Arc;
 pub mod convert;
 pub mod field;
 pub mod intrusive;
+pub mod lll;
 pub mod rb;
 pub mod slist;
 

@@ -81,7 +81,7 @@ pub struct Node {
     // This is an atomic to allow acquiring unused nodes. Once acquired, a list
     // can use non-atomic reads. Writes must be atomic still, to prevent
     // temporary releases.
-    next: atomic::Atomic<usize>,
+    pub(crate) next: atomic::Atomic<usize>,
     // List nodes store pointers to other nodes, so nodes must always be pinned
     // when linked.
     _pin: core::marker::PhantomPinned,
@@ -137,23 +137,27 @@ pub use util_slist_node_of as node_of;
 
 // Marks the end of a list, to be able to distinguish unlinked nodes from tail
 // nodes. Since the initial page is reserved, this cannot match real nodes.
-const END: usize = core::mem::align_of::<Node>();
+pub(crate) const END: usize = core::mem::align_of::<Node>();
 
 impl<Ref, Frt> List<Ref, Frt>
 where
     Ref: util::intrusive::Reference,
     Frt: util::intrusive::Field<Ref, Node = Node>,
 {
+    pub(crate) const fn with(first: usize) -> Self {
+        Self {
+            first: atomic::Atomic::new(first),
+            _ref: core::marker::PhantomData,
+            _frt: core::marker::PhantomData,
+        }
+    }
+
     /// Create a new empty list.
     ///
     /// The new list has no entries linked and is completely independent of
     /// other lists.
     pub const fn new() -> Self {
-        Self {
-            first: atomic::Atomic::new(END),
-            _ref: core::marker::PhantomData,
-            _frt: core::marker::PhantomData,
-        }
+        Self::with(END)
     }
 
     /// Check whether the list is empty.

@@ -1,0 +1,313 @@
+// SPDX-License-Identifier: GPL-2.0
+//! # Intrusive Lockless Linked Lists
+//!
+//! This module implements an intrusive lockless linked list. It is similar
+//! to `linux/llist.h`, but implemented in pure Rust.
+//!
+//! This follows the intrusive design described in
+//! [`intrusive`](crate::util::intrusive). However, it only offers a very
+//! limited API surface. For a general purpose single linked list list API,
+//! use [`util::slist`].
+//!
+//! The core entrypoint is [`List`], which maintains a single pointer to the
+//! last entry in a single linked list. Elements are stored by their [`Node`]
+//! metadata field, which again is just a single pointer to the respective
+//! previous element in a list.
+//!
+//! More generally, [`List`] can be seen as a multi-producer/multi-consumer
+//! channel, similar to (but very much reduced in scope)
+//! `std::sync::mpsc` in the Rust standard library.
+
+use kernel::prelude::*;
+use kernel::sync::atomic;
+
+use crate::util;
+
+/// Intrusive lockless single linked list to store elements.
+///
+/// A [`List`] effectively provides two operations:
+/// 1) Push a new element to the front of the list.
+/// 2) Remove all elements from the list and return them.
+///
+/// Both operations can be performed without any locks but only via hardware
+/// atomic operations.
+///
+/// This list is mainly used for multi-producer / single-or-multi-consumer
+/// (mpsc/mpmc) channels. That is, it serves as handover of items from
+/// producers to a consumer / consumers. The list does not provide any
+/// iterators, cursors, or other utilities to modify or inspect a list. If
+/// those are needed, proper locked lists are the better option.
+///
+/// Elements stored in a [`List`] are owned by that list, but are not moved,
+/// nor allocated by the list. Instead, the list takes ownership of a pointer
+/// to the element (either via smart pointers, or via references that have a
+/// lifetime that exceeds the lifetime of the list). Once an element is
+/// removed, ownership is transferred back to the caller.
+///
+/// [`List`] uses the same nodes as [`util::slist::Node`], and thus can move
+/// nodes from one to another.
+pub struct List<Ref, Frt>
+where
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
+{
+    // Pointer to the first node in the list. Set to `END` if the list is
+    // empty. All other pointers always represent a pinned owned reference to
+    // an entry, gained via `Ref::pin_into_deref()`.
+    first: atomic::Atomic<usize>,
+    // Lists effectively own their entries of type `Ref`. Ensure this is
+    // reflected in this type.
+    _ref: core::marker::PhantomData<Ref>,
+    // Different lists can store entries of type `Ref` via different nodes. By
+    // pinning the field-representing-type, it is always clear which node a
+    // list is using. `Field<T>` is prohibited from exposing any subtyping, so
+    // we can directly embed `Frt` here.
+    _frt: core::marker::PhantomData<Frt>,
+}
+
+/// Metadata required for elements of a [`List`].
+///
+/// This is an alias for [`util::slist::Node`]. That is, this uses the same
+/// node type as the general purpose single-linked list provided by
+/// [`util::slist`].
+pub type Node = util::slist::Node;
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! util_lll_impl_pin_node {
+    ($base:ty, $field:ident $(,)?) => {
+        $crate::util::field::impl_pin_field!{$base, $field, $crate::util::lll::Node}
+    }
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! util_lll_node_of {
+    ($base:ty, $field:ident $(,)?) => {
+        $crate::util::field::typed_field_of!{$base, $field, $crate::util::lll::Node}
+    }
+}
+
+/// Alias of [`impl_pin_field!()`](util::field::impl_pin_field) with a fixed
+/// member field type of [`Node`].
+#[doc(inline)]
+pub use util_lll_impl_pin_node as impl_pin_node;
+
+/// Alias of [`typed_field_of!()`](util::field::typed_field_of) with a fixed
+/// member field type of [`Node`].
+#[doc(inline)]
+pub use util_lll_node_of as node_of;
+
+impl<Ref, Frt> List<Ref, Frt>
+where
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
+{
+    /// Create a new empty list.
+    ///
+    /// The new list has no entries linked and is completely independent of
+    /// other lists.
+    pub const fn new() -> Self {
+        Self {
+            first: atomic::Atomic::new(util::slist::END),
+            _ref: core::marker::PhantomData,
+            _frt: core::marker::PhantomData,
+        }
+    }
+
+    /// Check whether the list is empty.
+    ///
+    /// This returns `true` is no entries are linked, `false` if at least one
+    /// entry is linked.
+    ///
+    /// Note that the list does not maintain a counter of how many elements are
+    /// linked.
+    pub fn is_empty(&self) -> bool {
+        self.first.load(atomic::Relaxed) == util::slist::END
+    }
+
+    /// Link a node at the front of a list.
+    ///
+    /// On success, `Ok` is returned and the node is linked at the front of the
+    /// list, with ownership transferred to the list.
+    ///
+    /// If the node is already on another list, this will return `Err` and
+    /// return ownership of the entry to the caller.
+    ///
+    /// On success, this ensures a release memory barrier before linking it
+    /// into the list, matching the acquire memory barrier in
+    /// [`List::clear()`].
+    pub fn try_link_front(
+        &self,
+        ent: Pin<Ref>,
+    ) -> Result<(), Pin<Ref>> {
+        let (ent_deref, ent_node) = Frt::acquire(ent);
+
+        // SAFETY: `ent_node` points to a valid immutable node as long as we
+        //     hold `ent_deref`.
+        let ent_node_r = unsafe { ent_node.as_ref() };
+
+        let mut first = self.first.load(atomic::Relaxed);
+
+        let Ok(_) = ent_node_r.next.cmpxchg(0, first, atomic::Relaxed) else {
+            // `ent_node_r` becomes invalid once `end_deref` is released.
+            #[expect(dropping_references)]
+            drop(ent_node_r);
+            // `ent` is already linked into another list, return ownership to
+            // the caller wrapped in an `Err`.
+            //
+            // SAFETY: `ent_deref` was just acquired from `pin_into_deref()`
+            //     and is no longer used afterwards.
+            return Err(unsafe { Frt::release(ent_deref) });
+        };
+
+        // Expose provenance, until `Atomic<*mut T>` is here.
+        let ent_node_addr = ent_node.as_ptr() as usize;
+
+        // Try updating the list-front until it succeeds.
+        loop {
+            // Use release barrier, since we want all operations on the node
+            // to be ordered before the node is pushed to the list. The
+            // matching acquire barrier is in `Self::clear()`.
+            match self.first.cmpxchg(
+                first,
+                ent_node_addr,
+                atomic::Release,
+            ) {
+                Ok(_) => break,
+                Err(v) => {
+                    first = v;
+                    ent_node_r.next.store(first, atomic::Relaxed);
+                },
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Clear the entire list and return the entries to the caller.
+    ///
+    /// This will atomically remove all entries from the list, and return those
+    /// entries as a general purpose single linked list to the caller.
+    ///
+    /// Note that [`List`] only supports adding entries at the front. Hence,
+    /// the returned list will be in LIFO (last-in-first-out) order.
+    ///
+    /// This ensures an acquire memory barrier matching the release memory
+    /// barrier in [`List::try_link_front()`].
+    pub fn clear(&self) -> util::slist::List<Ref, Frt> {
+        util::slist::List::with(
+            // Use acquire barrier to ensure writes to the nodes are visible,
+            // if done before they were linked. The matching release barrier is
+            // in `Self::try_link_front()`.
+            self.first.xchg(util::slist::END, atomic::Acquire),
+        )
+    }
+}
+
+// Convenience helpers
+impl<Ref, Frt> List<Ref, Frt>
+where
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
+{
+    /// Link a node at the front of a list.
+    ///
+    /// Works like [`List::try_link_front()`] but warns on error and leaks the
+    /// entry.
+    pub fn link_front(&self, ent: Pin<Ref>) {
+        self.try_link_front(ent).unwrap_or_else(|v| {
+            kernel::warn_on!(true);
+            core::mem::forget(v);
+        })
+    }
+}
+
+// SAFETY: `List` can be sent along CPUs, as long as the data it contains can
+//     also be sent along. `List` never cares about the CPU it is called on.
+unsafe impl<Ref, Frt> Send for List<Ref, Frt>
+where
+    Ref: Send + util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
+{
+}
+
+// SAFETY: `List` is meant to be shared across CPUs and safely handles parallel
+//     accesses through atomics. It never hands out references to stored
+//     elements, so it is `Sync` as long as the data it sends along is `Send`.
+unsafe impl<Ref, Frt> Sync for List<Ref, Frt>
+where
+    Ref: Send + util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
+{
+}
+
+impl<Ref, Frt> core::default::Default for List<Ref, Frt>
+where
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
+{
+    /// Return a new empty list.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Ref, Frt> core::ops::Drop for List<Ref, Frt>
+where
+    Ref: util::intrusive::Reference,
+    Frt: util::intrusive::Field<Ref, Node = Node>,
+{
+    /// Clear a list before dropping it.
+    ///
+    /// This drops all elements in the list via [`List::clear()`], before
+    /// dropping the list. This ensures that the elements of a list are
+    /// not leaked.
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+#[kunit_tests(bus1_util_lll)]
+mod test {
+    use super::*;
+
+    #[derive(Default)]
+    struct Entry {
+        key: u8,
+        node: Node,
+    }
+
+    impl_pin_node!(Entry, node);
+
+    #[test]
+    fn test_basic() {
+        let e0 = core::pin::pin!(Entry { key: 0, ..Default::default() });
+        let e1 = core::pin::pin!(Entry { key: 1, ..Default::default() });
+
+        let list: List<&Entry, node_of!(Entry, node)> = List::new();
+
+        assert!(list.is_empty());
+        assert!(!e0.node.is_linked());
+        assert!(!e1.node.is_linked());
+
+        list.link_front(e0.as_ref());
+        list.link_front(e1.as_ref());
+
+        assert!(!list.is_empty());
+        assert!(e0.node.is_linked());
+        assert!(e1.node.is_linked());
+
+        assert!(list.try_link_front(e0.as_ref()).is_err());
+        assert!(list.try_link_front(e1.as_ref()).is_err());
+
+        let mut r = list.clear();
+        assert_eq!(r.unlink_front().unwrap().key, 1);
+        assert_eq!(r.unlink_front().unwrap().key, 0);
+        assert!(r.unlink_front().is_none());
+
+        assert!(list.is_empty());
+        assert!(!e0.node.is_linked());
+        assert!(!e1.node.is_linked());
+    }
+}
