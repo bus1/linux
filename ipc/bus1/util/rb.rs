@@ -378,6 +378,31 @@ where
         self.root.rb_node.is_null()
     }
 
+    /// Check whether this tree contains a given node.
+    ///
+    /// This returns `true` if the node is linked into this tree. It returns
+    /// `false` if the node is currently unlinked or linked into another tree.
+    ///
+    /// This operation is performed in O(1), regardless of the number of
+    /// elements in the tree.
+    ///
+    /// While holding a reference to [`Tree`], no node can be linked to, or
+    /// unlinked from, the tree. Hence, unlike [`Node::is_linked()`] the return
+    /// value of this method is stable for at least the lifetime of `self`.
+    pub fn contains(
+        &self,
+        ent_target: &Ref::Target,
+    ) -> bool {
+        let ent_deref = util::nonnull_from_ref(&*ent_target);
+        // SAFETY: `ent_deref` points to a valid allocation.
+        let ent_node = unsafe { Self::to_node(ent_deref) };
+        // SAFETY: `ent_node` points to a valid node.
+        let v = unsafe {
+            (*Node::owner(ent_node)).load(atomic::Relaxed)
+        };
+        v == self.as_owner()
+    }
+
     /// Try creating a mutable cursor to an explicit element.
     ///
     /// This tries to create a [`CursorMut`] for the given element. If the
@@ -533,6 +558,40 @@ where
         )
     }
 
+    /// Try linking a new entry in this tree.
+    ///
+    /// This combines [`Tree::find_slot_by()`] with [`Slot::try_link()`].
+    ///
+    /// On success, the ownership of the new entry is transferred to the tree
+    /// and the dereferenced entry is returned as a borrow wrapped in `Ok`. If
+    /// there either already is a matching entry linked into the tree, or if
+    /// `ent` is already linked into any tree, this function will fail and
+    /// return ownership of the new entry to the caller wrapped in `Err`.
+    ///
+    /// If this function fails, the slot is immediately dropped. If a retry
+    /// attempt is desired, the slot should be retrieved via `find_slot_by()`
+    /// instead. This avoids repeated traversals.
+    ///
+    /// ## Comparator
+    ///
+    /// The comparator `cmp_fn` gets the dereferenced to-be-linked entry `ent`
+    /// as first argument and an existing entry in the tree as second argument.
+    /// It shall return an order describing the relationship of the first
+    /// argument compared to the second.
+    pub fn try_link_by<CmpFn>(
+        self: Pin<&mut Self>,
+        ent: Pin<Ref>,
+        mut cmp_fn: CmpFn,
+    ) -> Result<Pin<&'_ Ref::Target>, Pin<Ref>>
+    where
+        CmpFn: FnMut(Pin<&Ref::Target>, Pin<&Ref::Target>) -> core::cmp::Ordering,
+    {
+        let ent_deref = ent.as_ref();
+        self.find_slot_by(
+            |other| cmp_fn(ent_deref, other),
+        ).try_link(ent)
+    }
+
     /// Remove all entries from a tree.
     ///
     /// Works like [`Tree::clear_with()`] but uses [`core::mem::drop()`] as
@@ -648,6 +707,22 @@ impl Node {
                 ).cast_mut(),
             )
         }
+    }
+
+    /// Check whether this node is linked into a tree.
+    ///
+    /// This returns `true` if this node is linked into any tree. It returns
+    /// `false` if the node is currently unlinked.
+    ///
+    /// Note that a node can be linked into a tree at any time. That is,
+    /// validity of the returned boolean can change spuriously, unless the
+    /// caller otherwise ensures exclusive access to the node.
+    pub fn is_linked(&self) -> bool {
+        // SAFETY: `self` trivially points to a valid allocation of a node.
+        let v = unsafe {
+            (*Self::owner(util::nonnull_from_ref(self))).load(atomic::Relaxed)
+        };
+        v != 0
     }
 }
 
