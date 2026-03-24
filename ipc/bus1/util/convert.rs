@@ -79,27 +79,18 @@ pub unsafe trait IntoDeref: Sized + core::ops::Deref {
 ///
 /// ## Safety
 ///
-/// The implementations of [`Deref`](core::ops::Deref) and [`FromDeref`] must
-/// be compatible. That is, `deref()` must return the same pointer as
-/// `from_deref()` takes. If [`DerefMut`] is implemented, `deref_mut()` must
-/// also return the same pointer.
-///
-/// Furthermore, for types that provide [pinned](core::pin) variants,
-/// [`FromDeref`] is part of the safety requirements of
-/// [`core::pin::Pin::new_unchecked()`] just like
-/// [`Deref`](core::ops::Deref) is.
-///
-/// An implementation must guarantee the safety invariants of the individual
-/// method implementations.
-pub unsafe trait FromDeref: Sized + core::ops::Deref {
+/// An implementation must uphold the documented guarantees of the individual
+/// methods.
+pub unsafe trait FromDeref: IntoDeref {
     /// Convert a dereferenced value back to its original value.
+    ///
+    /// This returns the value that was originally passed to
+    /// [`IntoDeref::into_deref()`].
     ///
     /// ## Safety
     ///
     /// The wrapped pointer must have been acquired via [`IntoDeref`] or a
-    /// matching equivalent (i.e., the wrapped pointer must be a valid pointer
-    /// for the smart pointer [`Self`]). This implies that it must be valid
-    /// for a suitable lifetime for [`Self`].
+    /// matching equivalent.
     ///
     /// If `Self` requires exclusive access to the wrapped pointer, the caller
     /// must guarantee that they do not make use of any retained copies of the
