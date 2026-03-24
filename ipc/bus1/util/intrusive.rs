@@ -45,7 +45,7 @@
 //!
 //! // Encode that `Entry` has a node as member field called `md`. The unstable
 //! // field-projections feature of Rust would make this obsolete.
-//! col::impl_pin_node!(Entry, md);
+//! util::field::impl_pin_field!(Entry, md, col::Node);
 //!
 //! // Create 3 entries, and then pin them on the stack. As an alternative, the
 //! // entries could also be dynamically allocated via `Box`, `Arc`, etc..
@@ -58,7 +58,7 @@
 //!
 //! // Create a fictional collection called `Map`, which stores elements of
 //! // type `Entry` using the `md` member field.
-//! let map = col::Map::<&Entry, col::node_of!(Entry, md)>::new();
+//! let map = col::Map::<col::node_of!(&Entry, md)>::new();
 //!
 //! // Nodes can be queried for their state at any time.
 //! assert!(!e0.md.is_linked());
@@ -219,3 +219,257 @@ where
 {
     type Node = Frt::Type;
 }
+
+/// Link metadata for intrusive data structures.
+///
+/// This trait represents the link between nodes in an intrusive data
+/// structure. It defines how to operate with the data-type that is stored
+/// in an intrusive data structure, and how to acquire and release the
+/// metadata stored in it.
+///
+/// An intrusive data-structure is usually generic over [`Link<Node>`], where
+/// `Node` is the type of intrusive metadata used with that data structure. A
+/// user then needs to provide an implementation of `Link<Node>` for the data
+/// type they want to use. The trait defines how to get acquire and release
+/// values of this data type, and how to locate the metadata of type `Node`
+/// within that type.
+///
+/// The trait is usually not directly implemented on any of the involved types.
+/// Instead, a representing meta-type is used, similar to
+/// field-representing-types of [`field projections`](crate::util::field). This
+/// module provides such a link-representing-type as [`LinkRepr`].
+///
+/// # Default Implementation via [`Deref`](core::ops::Deref)
+///
+/// If a type implements [`IntoDeref`](field::IntoDeref), a
+/// default implementation of [`Link`] is provided via `Deref::Target` as
+/// `Link<Ref = T, Target = T::Target>`. The implementation is provided via
+/// a field-representing-type on [`LinkRepr`], and can be accessed via
+/// [`link_of!()`].
+///
+/// # Safety
+///
+/// An implementation must uphold the documented guarantees of the individual
+/// methods.
+pub unsafe trait Link<Node: ?Sized> {
+    /// Reference type that is used with an intrusive collection.
+    type Ref;
+    /// Target type that represents the borrowed version of the reference type.
+    type Target: ?Sized;
+
+    /// Acquire a reference target pointer from a reference.
+    ///
+    /// This will turn the reference into a reference target pointer and node
+    /// pointer. It is up to the caller to ensure calling [`Self::release()`]
+    /// when releasing the pointer. Otherwise, the original reference will be
+    /// leaked.
+    ///
+    /// The returned pointer is guaranteed to be convertible to a reference for
+    /// any caller-chosen lifetime `'a` where `Self::Ref: 'a`.
+    ///
+    /// Conversion to a reference is subject to exclusivity guarantees of `&`
+    /// and `&mut` (i.e., only shared refs, or no shared ref but exactly one
+    /// mutable ref).
+    ///
+    /// If, and only if, [`LinkMut`] is implemented on `Self`, mutable
+    /// references are allowed.
+    ///
+    /// Repeated calls to `acquire()` (with intermittent calls to `release()`)
+    /// produce the same pointer.
+    fn acquire(v: Pin<Self::Ref>) -> NonNull<Node>;
+
+    /// Release a reference target pointer to get back the original reference.
+    ///
+    /// # Safety
+    ///
+    /// The reference target pointer must have been acquired via
+    /// [`Self::acquire()`], and the caller must cease further use of the
+    /// pointer.
+    unsafe fn release(v: NonNull<Node>) -> Pin<Self::Ref>;
+
+    /// Borrow the reference target temporarily.
+    ///
+    /// # Safety
+    ///
+    /// `v` must have been from [`Self::acquire()`] and no mutable reference
+    /// can co-exist.
+    unsafe fn borrow<'a>(v: NonNull<Node>) -> Pin<&'a Self::Target>
+    where
+        Self::Ref: 'a;
+
+    /// Clone a borrow of the reference target.
+    ///
+    /// This creates a clone of the original reference type from a borrowed
+    /// node. This is only available, if the reference type implements
+    /// [`Clone`](core::clone::Clone).
+    ///
+    /// # Safety
+    ///
+    /// `v` must have been from [`Self::acquire()`] and no other reference
+    /// can co-exist.
+    unsafe fn borrow_clone(v: NonNull<Node>) -> Pin<Self::Ref>
+    where
+        Self::Ref: Clone,
+    {
+        // Create a clone by temporarily releasing and re-acquiring the
+        // original reference. Ensure a panic in the `clone()`-impl does not
+        // drop the original reference, just to be safe and avoid cascading
+        // failures.
+        let t = core::mem::ManuallyDrop::new(unsafe { Self::release(v) });
+        let r = (*t).clone();
+        let _ = Self::acquire(core::mem::ManuallyDrop::into_inner(t));
+        r
+    }
+}
+
+/// Mutability Extensions to [`Link`].
+///
+/// This trait extends [`Link`] by declaring the reference type to grant
+/// mutable access to the stored data.
+///
+/// # Safety
+///
+/// An implementation must uphold the documented guarantees of the individual
+/// methods.
+pub unsafe trait LinkMut<Node: ?Sized>: Link<Node> {
+    /// Mutably borrow the reference target temporarily.
+    ///
+    /// # Safety
+    ///
+    /// `v` must have been from [`Self::acquire()`] and no other reference
+    /// can co-exist.
+    unsafe fn borrow_mut<'a>(v: NonNull<Node>) -> Pin<&'a mut Self::Target>
+    where
+        Self::Ref: 'a;
+}
+
+/// Representation of link metadata for intrusive data structures.
+///
+/// This type is used as implementing type for [`Link`] if field projections
+/// are used to access metadata. It is a 1-ZST and only used to represent the
+/// link between nodes of an intrusive data structure.
+///
+/// This type takes the reference type of the data structure as first argument
+/// (called `Ref`), and the field-representing-type of the reference target as
+/// second argument (called `Frt`). The type is usually access via
+/// [`link_of!()`].
+///
+/// This type is invariant over all its type parameters.
+#[repr(C, packed)]
+pub struct LinkRepr<Ref: ?Sized, Frt> {
+    _ref: [*mut Ref; 0],
+    _frt: [*mut Frt; 0],
+}
+
+// SAFETY: Upholds method guarantees.
+unsafe impl<Ref, Frt> Link<Frt::Type> for LinkRepr<Ref, Frt>
+where
+    Ref: util::convert::FromDeref,
+    Frt: field::PinField<Base = Ref::Target>,
+{
+    type Ref = Ref;
+    type Target = Frt::Base;
+
+    fn acquire(v: Pin<Self::Ref>) -> NonNull<Frt::Type> {
+        let target = Ref::pin_into_deref(v);
+        // SAFETY: `target` was just acquired from `pin_into_deref()`, which
+        //     guarantees that the result is convertible to a reference. A
+        //     field projection thus cannot be `NULL`.
+        unsafe {
+            NonNull::new_unchecked(
+                field::field_of_ptr::<Frt>(target.as_ptr())
+            )
+        }
+    }
+
+    unsafe fn release(v: NonNull<Frt::Type>) -> Pin<Self::Ref> {
+        // SAFETY: Caller guarantees that `v` was from `acquire()`, and
+        //     thus points into an allocation of `Frt::Type` within a
+        //     `Self::Target`. Hence, `base_of_ptr()` is safe to call and
+        //     cannot return `NULL`.
+        let target = unsafe {
+            NonNull::new_unchecked(field::base_of_ptr::<Frt>(v.as_ptr()))
+        };
+        // SAFETY: Caller guarantees that `v` was from `acquire()`, and thus
+        //     from `pin_into_deref()`. They also guarantee to cease using `v`.
+        unsafe { util::convert::FromDeref::pin_from_deref(target) }
+    }
+
+    unsafe fn borrow<'a>(v: NonNull<Frt::Type>) -> Pin<&'a Self::Target>
+    where
+        Self::Ref: 'a,
+    {
+        // SAFETY: Caller guarantees that `v` was from `acquire()`, and
+        //     thus points into an allocation of `Frt::Type` within a
+        //     `Self::Target`. Hence, `base_of_ptr()` is safe to call and
+        //     is pinned.
+        //     Caller also guarantees that no mutable reference exists.
+        unsafe { Pin::new_unchecked(&*field::base_of_ptr::<Frt>(v.as_ptr())) }
+    }
+}
+
+// SAFETY: Upholds method guarantees.
+unsafe impl<Ref, Frt> LinkMut<Frt::Type> for LinkRepr<Ref, Frt>
+where
+    Ref: util::convert::FromDeref,
+    Frt: field::PinField<Base = Ref::Target>,
+{
+    unsafe fn borrow_mut<'a>(v: NonNull<Frt::Type>) -> Pin<&'a mut Self::Target>
+    where
+        Self::Ref: 'a,
+    {
+        // SAFETY: Caller guarantees that `v` was from `acquire()`, and
+        //     thus points into an allocation of `Frt::Type` within a
+        //     `Self::Target`. Hence, `base_of_ptr()` is safe to call and
+        //     is pinned.
+        //     Caller also guarantees that no other reference exists.
+        unsafe { Pin::new_unchecked(&mut *field::base_of_ptr::<Frt>(v.as_ptr())) }
+    }
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! util_intrusive_lrt {
+    ($ref:ty, $deref:ty, $field:ident, $node:ty $(,)?) => {
+        $crate::util::intrusive::LinkRepr<$ref, $crate::util::field::typed_field_of!{$deref, $field, $node}>
+    }
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! util_intrusive_link_of {
+    ($ref:ty, $field:ident, $node:ty $(,)?) => {
+        $crate::util::intrusive::lrt!{
+            $ref,
+            <$ref as core::ops::Deref>::Target,
+            $field,
+            $node,
+        }
+    }
+}
+
+/// Resolve to the link-representing-type (LRT).
+///
+/// This takes as arguments:
+/// - $ref:ty
+/// - $deref:ty
+/// - $field:ident
+/// - $node:ty
+///
+/// And resolves to `LinkRepr<$ref, typed_field_of!($deref, $field, $node)>`
+/// using a field-representing-type.
+#[doc(inline)]
+pub use crate::util_intrusive_lrt as lrt;
+
+/// Resolve to [`LinkRepr`] of a reference type.
+///
+/// This takes as arguments:
+/// - $ref:ty
+/// - $field:ident
+/// - $node:ty
+///
+/// It resolves to a type implementing [`Link<$node>`], using
+/// [`Deref`](core::ops::Deref) on `$ref` as reference target and its
+/// field-representing-type with `$field` as member name.
+#[doc(inline)]
+pub use crate::util_intrusive_link_of as link_of;
