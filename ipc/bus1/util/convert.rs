@@ -31,21 +31,23 @@ use crate::util;
 /// where mutable access is granted, and shared values like
 /// [`Arc`](kernel::sync::Arc) where no mutable access is granted.
 ///
+/// If [`DerefMut`] is implemented as well, then the value is available
+/// mutably. If it is not implemented, then mutably is left undefined.
+///
 /// ## Safety
 ///
 /// The implementations of [`Deref`](core::ops::Deref) and [`IntoDeref`] must
 /// be compatible. That is, `deref()` must return the same pointer as
 /// `into_deref()`. If [`DerefMut`] is implemented, `deref_mut()` must also
-/// return the same pointer. Both must be replaceable by taking the raw pointer
-/// and converting it to a matching reference.
+/// return the same pointer.
 ///
 /// Furthermore, for types that provide [pinned](core::pin) variants,
 /// [`IntoDeref`] is part of the safety requirements of
 /// [`core::pin::Pin::new_unchecked()`] just like
 /// [`Deref`](core::ops::Deref) is.
 ///
-/// An implementation must guarantee the safety invariants of the individual
-/// method implementations.
+/// An implementation must uphold the documented guarantees of the individual
+/// methods.
 pub unsafe trait IntoDeref: Sized + core::ops::Deref {
     /// Convert a value into a raw pointer to its dereferenced value.
     ///
@@ -54,11 +56,19 @@ pub unsafe trait IntoDeref: Sized + core::ops::Deref {
     ///
     /// The returned pointer is guaranteed to be convertible to a shared
     /// reference for any caller-chosen lifetime `'a` where `Self: 'a`.
+    ///
+    /// If [`DerefMut`](core::ops::DerefMut) is implemented for [`Self`],
+    /// then the pointer is guaranteed to be convertible to a mutable
+    /// reference for any caller-chosen lifetime `'a` where `Self: 'a`.
+    ///
+    /// Conversion to a reference is subject to exclusivity guarantees as
+    /// required by `&` and `&mut`.
     fn into_deref(v: Self) -> NonNull<Self::Target>;
 
     /// Convert a pinned value into a raw pointer to its dereferenced value.
     ///
-    /// This is the pinned equivalent of [`Self::into_deref()`].
+    /// This is the pinned equivalent of [`Self::into_deref()`]. The pointer
+    /// is only convertible to a pinned reference.
     fn pin_into_deref(v: Pin<Self>) -> NonNull<Self::Target> {
         // SAFETY: Pinned types must ensure they uphold pinning guarantees
         //     just like `Deref` does (see trait requirements).
@@ -92,9 +102,8 @@ pub unsafe trait FromDeref: IntoDeref {
     /// The wrapped pointer must have been acquired via [`IntoDeref`] or a
     /// matching equivalent.
     ///
-    /// If `Self` requires exclusive access to the wrapped pointer, the caller
-    /// must guarantee that they do not make use of any retained copies of the
-    /// wrapped pointer.
+    /// The caller must guarantee that they do not make use of any retained
+    /// copies of the wrapped pointer.
     ///
     /// It is always safe to call this on values obtained via [`IntoDeref`], as
     /// long as the raw pointer is no longer used afterwards.
@@ -110,8 +119,8 @@ pub unsafe trait FromDeref: IntoDeref {
     /// Furthermore, all requirements of [`Self::from_deref()`] apply.
     unsafe fn pin_from_deref(v: NonNull<Self::Target>) -> Pin<Self> {
         // SAFETY: Pinned types must ensure they uphold pinning guarantees
-        //     just like `Deref` does (see trait requirements). Also, the
-        //     caller must ensure the original value was pinned.
+        //     just like `Deref` does (see trait requirements of `IntoDeref`).
+        //     Also, the caller must ensure the original value was pinned.
         unsafe { Pin::new_unchecked(Self::from_deref(v)) }
     }
 }
@@ -121,37 +130,37 @@ mod impls {
     use kernel::alloc::{Allocator, Box};
     use kernel::sync::Arc;
 
-    // SAFETY: Coherent with `Deref` and pinning.
+    // SAFETY: Coherent with `Deref` and pinning. Upholds method guarantees.
     unsafe impl<T: ?Sized> IntoDeref for &T {
         fn into_deref(v: Self) -> NonNull<Self::Target> {
             util::nonnull_from_ref(v)
         }
     }
 
-    // SAFETY: Coherent with `Deref` and pinning.
+    // SAFETY: Upholds method guarantees.
     unsafe impl<T: ?Sized> FromDeref for &T {
         unsafe fn from_deref(v: NonNull<Self::Target>) -> Self {
-            // SAFETY: Delegated to caller.
+            // SAFETY: Caller guarantees `v` is a `&T`.
             unsafe { v.as_ref() }
         }
     }
 
-    // SAFETY: Coherent with `Deref` and pinning.
+    // SAFETY: Coherent with `Deref` and pinning. Upholds method guarantees.
     unsafe impl<T: ?Sized> IntoDeref for &mut T {
         fn into_deref(v: Self) -> NonNull<Self::Target> {
             util::nonnull_from_mut(v)
         }
     }
 
-    // SAFETY: Coherent with `Deref` and pinning.
+    // SAFETY: Upholds method guarantees.
     unsafe impl<T: ?Sized> FromDeref for &mut T {
         unsafe fn from_deref(mut v: NonNull<Self::Target>) -> Self {
-            // SAFETY: Delegated to caller.
+            // SAFETY: Caller guarantees `v` is a `&mut T`.
             unsafe { v.as_mut() }
         }
     }
 
-    // SAFETY: Coherent with `Deref` and pinning.
+    // SAFETY: Coherent with `Deref` and pinning. Upholds method guarantees.
     unsafe impl<T: ?Sized, A: Allocator> IntoDeref for Box<T, A> {
         fn into_deref(v: Self) -> NonNull<Self::Target> {
             // SAFETY: `Box::into_raw()` never returns NULL.
@@ -159,15 +168,15 @@ mod impls {
         }
     }
 
-    // SAFETY: Coherent with `Deref` and pinning.
+    // SAFETY: Upholds method guarantees.
     unsafe impl<T: ?Sized, A: Allocator> FromDeref for Box<T, A> {
         unsafe fn from_deref(v: NonNull<Self::Target>) -> Self {
-            // SAFETY: Delegated to caller.
+            // SAFETY: Caller guarantees `v` is from `IntoDeref`.
             unsafe { Box::from_raw(v.as_ptr()) }
         }
     }
 
-    // SAFETY: Coherent with `Deref` and pinning.
+    // SAFETY: Coherent with `Deref` and pinning. Upholds method guarantees.
     unsafe impl<T: ?Sized> IntoDeref for Arc<T> {
         fn into_deref(v: Self) -> NonNull<Self::Target> {
             // SAFETY: `Arc::into_raw()` never returns NULL.
@@ -175,10 +184,10 @@ mod impls {
         }
     }
 
-    // SAFETY: Coherent with `Deref` and pinning.
+    // SAFETY: Upholds method guarantees.
     unsafe impl<T: ?Sized> FromDeref for Arc<T> {
         unsafe fn from_deref(v: NonNull<Self::Target>) -> Self {
-            // SAFETY: Delegated to caller.
+            // SAFETY: Caller guarantees `v` is from `IntoDeref`.
             unsafe { Arc::from_raw(v.as_ptr()) }
         }
     }
