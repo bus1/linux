@@ -45,10 +45,9 @@ use crate::util;
 /// single list will use the same member field. But a single element can have
 /// multiple different member fields of type [`Node`], and thus be linked into
 /// multiple different lists simultaneously.
-pub struct List<Ref, Frt>
+pub struct List<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     // Pointer to the first node in a single-linked list. This is never `NULL`,
     // but can be `END`, in which case it marks the end of the list. This
@@ -56,14 +55,10 @@ where
     // via `Ref::pin_into_deref()`.
     // Only uses atomics to allow `CursorMut` to treat it as `Node.next`.
     first: atomic::Atomic<usize>,
-    // Lists effectively own their entries of type `Ref`. Ensure this is
-    // reflected in this type.
-    _ref: core::marker::PhantomData<Ref>,
-    // Different lists can store entries of type `Ref` via different nodes. By
-    // pinning the field-representing-type, it is always clear which node a
-    // list is using. `Field<T>` is prohibited from exposing any subtyping, so
-    // we can directly embed `Frt` here.
-    _frt: core::marker::PhantomData<Frt>,
+    // Different lists can store entries of type `Link::Ref` via different
+    // nodes. By pinning the link-representing-type, it is always clear which
+    // node a list is using.
+    _lrt: core::marker::PhantomData<Lrt>,
 }
 
 /// Metadata required for elements of a [`List`].
@@ -95,10 +90,9 @@ pub struct Node {
 ///
 /// Single linked lists can only be iterated in one direction, so this cursor
 /// behaves very similar to standard iterators.
-pub struct CursorMut<'list, Ref, Frt>
+pub struct CursorMut<'list, Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     // Current position of the cursor. Always refers to the pointer to an
     // element, rather than the element itself, to allow removal of the
@@ -106,32 +100,18 @@ where
     pos: NonNull<atomic::Atomic<usize>>,
     // Cursors borrow their list mutably, yet that borrow is never used,
     // so provide as phantom data.
-    _list: core::marker::PhantomData<&'list mut List<Ref, Frt>>,
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! util_slist_impl_pin_node {
-    ($base:ty, $field:ident $(,)?) => {
-        $crate::util::field::impl_pin_field!{$base, $field, $crate::util::slist::Node}
-    }
+    _list: core::marker::PhantomData<&'list mut List<Lrt>>,
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! util_slist_node_of {
-    ($base:ty, $field:ident $(,)?) => {
-        $crate::util::field::typed_field_of!{$base, $field, $crate::util::slist::Node}
+    ($ref:ty, $field:ident $(,)?) => {
+        $crate::util::intrusive::link_of!{$ref, $field, $crate::util::slist::Node}
     }
 }
 
-/// Alias of [`impl_pin_field!()`](util::field::impl_pin_field) with a fixed
-/// member field type of [`Node`].
-#[doc(inline)]
-pub use util_slist_impl_pin_node as impl_pin_node;
-
-/// Alias of [`typed_field_of!()`](util::field::typed_field_of) with a fixed
-/// member field type of [`Node`].
+/// Alias of [`link_of!()`](util::intrusive::link_of) for [`Node`] members.
 #[doc(inline)]
 pub use util_slist_node_of as node_of;
 
@@ -139,16 +119,20 @@ pub use util_slist_node_of as node_of;
 // nodes. Since the initial page is reserved, this cannot match real nodes.
 pub(crate) const END: usize = core::mem::align_of::<Node>();
 
-impl<Ref, Frt> List<Ref, Frt>
+impl<Lrt> List<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
-    pub(crate) const fn with(first: usize) -> Self {
+    /// Create a new list with the given value for `first`.
+    ///
+    /// # Safety
+    ///
+    /// `first` must either be [`END`] or point to the first node of a list,
+    /// with ownership transferred to the new list.
+    pub(crate) const unsafe fn with(first: usize) -> Self {
         Self {
             first: atomic::Atomic::new(first),
-            _ref: core::marker::PhantomData,
-            _frt: core::marker::PhantomData,
+            _lrt: core::marker::PhantomData,
         }
     }
 
@@ -157,7 +141,8 @@ where
     /// The new list has no entries linked and is completely independent of
     /// other lists.
     pub const fn new() -> Self {
-        Self::with(END)
+        // SAFETY: `END` is trivially allowed as argument.
+        unsafe { Self::with(END) }
     }
 
     /// Check whether the list is empty.
@@ -176,7 +161,7 @@ where
     /// Create a new mutable cursor for the list, which initially points at the
     /// first element. The cursor mutably borrows the list for its entire
     /// lifetime.
-    pub fn cursor_mut(&mut self) -> CursorMut<'_, Ref, Frt> {
+    pub fn cursor_mut(&mut self) -> CursorMut<'_, Lrt> {
         CursorMut {
             pos: util::nonnull_from_ref(&self.first),
             _list: core::marker::PhantomData,
@@ -192,8 +177,8 @@ where
     /// return ownership of the entry to the caller.
     pub fn try_link_front(
         &mut self,
-        ent: Pin<Ref>,
-    ) -> Result<Pin<&Ref::Target>, Pin<Ref>> {
+        ent: Pin<Lrt::Ref>,
+    ) -> Result<Pin<&Lrt::Target>, Pin<Lrt::Ref>> {
         self.cursor_mut().try_link_consume(ent)
     }
 
@@ -202,7 +187,7 @@ where
     /// If the list is empty, this will return `None`. Otherwise, the first
     /// entry is removed from the list and ownership is transferred to the
     /// caller.
-    pub fn unlink_front(&mut self) -> Option<Pin<Ref>> {
+    pub fn unlink_front(&mut self) -> Option<Pin<Lrt::Ref>> {
         self.cursor_mut().unlink()
     }
 
@@ -217,7 +202,7 @@ where
         mut clear_fn: ClearFn,
     )
     where
-        ClearFn: FnMut(Pin<Ref>),
+        ClearFn: FnMut(Pin<Lrt::Ref>),
     {
         while let Some(v) = self.unlink_front() {
             clear_fn(v);
@@ -226,20 +211,16 @@ where
 }
 
 // Convenience helpers
-impl<Ref, Frt> List<Ref, Frt>
+impl<Lrt> List<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Link a node at the front of the list.
     ///
     /// Works like [`List::try_link_front()`] but panics on error.
-    pub fn link_front(&mut self, ent: Pin<Ref>) -> Pin<&Ref::Target> {
-        self.try_link_front(ent).unwrap_or_else(|v| {
-            core::panic!(
-                "attempting to link a foreign node: {:?}",
-                core::ptr::from_ref(&*v)
-            );
+    pub fn link_front(&mut self, ent: Pin<Lrt::Ref>) -> Pin<&Lrt::Target> {
+        self.try_link_front(ent).unwrap_or_else(|_| {
+            panic!("attempting to link a foreign node");
         })
     }
 
@@ -255,27 +236,26 @@ where
 // SAFETY: Lists have no interior mutability, nor do they otherwise care for
 //     their calling CPU. They can be freely sent across CPUs, only limited by
 //     the stored type.
-unsafe impl<Ref, Frt> Send for List<Ref, Frt>
+unsafe impl<Lrt> Send for List<Lrt>
 where
-    Ref: Send + util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
+    Lrt::Ref: Send,
 {
 }
 
 // SAFETY: Lists have no interior mutability, nor do they otherwise care for
 //     their calling CPU. They can be shared across CPUs, only limited by
 //     the stored type.
-unsafe impl<Ref, Frt> Sync for List<Ref, Frt>
+unsafe impl<Lrt> Sync for List<Lrt>
 where
-    Ref: Sync + util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
+    Lrt::Ref: Sync,
 {
 }
 
-impl<Ref, Frt> core::default::Default for List<Ref, Frt>
+impl<Lrt> core::default::Default for List<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Return a new empty list.
     fn default() -> Self {
@@ -283,10 +263,9 @@ where
     }
 }
 
-impl<Ref, Frt> core::ops::Drop for List<Ref, Frt>
+impl<Lrt> core::ops::Drop for List<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Clear a list before dropping it.
     fn drop(&mut self) {
@@ -363,13 +342,12 @@ impl core::ops::Drop for Node {
     }
 }
 
-impl<'list, Ref, Frt> CursorMut<'list, Ref, Frt>
+impl<'list, Lrt> CursorMut<'list, Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     fn as_pos(&self) -> &atomic::Atomic<usize> {
-        // SAFETY: `Self.pos` always refers to a valid atomic on a valid node.
+        // SAFETY: `Self.pos` is always convertible to a reference.
         unsafe { self.pos.as_ref() }
     }
 
@@ -388,17 +366,17 @@ where
 
     fn link(
         &mut self,
-        ent: Pin<Ref>,
-    ) -> Result<NonNull<Ref::Target>, Pin<Ref>> {
+        ent: Pin<Lrt::Ref>,
+    ) -> Result<NonNull<Node>, Pin<Lrt::Ref>> {
         let pos = self.as_pos();
-        let (ent_deref, ent_node) = Frt::acquire(ent);
+        let ent_node = Lrt::acquire(ent);
 
         // Nothing is dependent on the value of `Node.next`, except for the
         // fact whether this operation succeeded, so perform a relaxed cmpxchg.
         // Any data dependence behind `Ref` is ordered on `self` (and `ent`).
         //
-        // SAFETY: `ent_node` points to a valid immutable node as long as we
-        //     hold `ent_deref`.
+        // SAFETY: We hold `ent_node` exclusively here, so it is convertible to
+        //     a shared reference for that long.
         if let Ok(_) = unsafe { ent_node.as_ref() }.next.cmpxchg(
             0,
             pos.load(atomic::Relaxed),
@@ -409,14 +387,14 @@ where
             // All nodes are owned by the list, so no ordering needed. Atomics
             // are only used to prevent temporary releases of the nodes.
             pos.store(ent_node_addr, atomic::Relaxed);
-            Ok(ent_deref)
+            Ok(ent_node)
         } else {
             // `ent` is already linked into another list, return ownership to
             // the caller wrapped in an `Err`.
             //
-            // SAFETY: `ent_deref` was just acquired from `acquire()` and is
+            // SAFETY: `ent_node` was just acquired from `acquire()` and is
             //     no longer used afterwards.
-            Err(unsafe { Frt::release(ent_deref) })
+            Err(unsafe { Lrt::release(ent_node) })
         }
     }
 
@@ -424,31 +402,49 @@ where
     ///
     /// If the cursor points past the last element, `None` is returned.
     /// Otherwise, a reference to the element is returned.
-    pub fn get(&self) -> Option<Pin<&Ref::Target>> {
+    pub fn get(&self) -> Option<Pin<&Lrt::Target>> {
         let ent_node = self.get_ptr()?;
         // SAFETY: `ent_node` was taken from the list, and a list ensures
-        //     those were acquired via `Frt::acquire()` and thus valid
+        //     those were acquired via `Lrt::acquire()` and thus valid
         //     until released. Since the cursor is immutably borrowed, the
         //     entry is valid for that lifetime.
-        Some(unsafe { Pin::new_unchecked(Frt::from_node(ent_node).as_ref()) })
+        Some(unsafe { Lrt::borrow(ent_node) })
+    }
+
+    /// Get a clone of the reference to the element the cursor points to.
+    ///
+    /// If the cursor points past the last element, `None` is returned.
+    /// Otherwise, a clone of the reference to the element is returned.
+    pub fn get_clone(&self) -> Option<Pin<Lrt::Ref>>
+    where
+        Lrt::Ref: Clone,
+    {
+        let ent_node = self.get_ptr()?;
+        // SAFETY: `ent_node` was taken from the list, and a list ensures
+        //     those were acquired via `Lrt::acquire()` and thus valid
+        //     until released. Since the cursor is immutably borrowed, the
+        //     entry is valid for that lifetime.
+        Some(unsafe { Lrt::borrow_clone(ent_node) })
     }
 
     /// Get a mutable reference to the element the cursor points to.
     ///
     /// If the cursor points past the last element, `None` is returned.
     /// Otherwise, a mutable reference to the element is returned.
-    pub fn get_mut(&mut self) -> Option<Pin<&mut Ref::Target>>
+    pub fn get_mut(
+        &mut self,
+    ) -> Option<Pin<&mut <Lrt as util::intrusive::Link<Node>>::Target>>
     where
-        Ref: core::ops::DerefMut,
+        Lrt: util::intrusive::LinkMut<Node>,
     {
         let ent_node = self.get_ptr()?;
         // SAFETY: `ent_node` was taken from the list, and a list ensures
-        //     those were acquired via `Frt::acquire()` and thus valid
+        //     those were acquired via `Lrt::acquire()` and thus valid
         //     until released. Since the cursor is immutably borrowed, the
         //     entry is valid for that lifetime.
-        //     Since we own a `Ref`, we can mutably borrow the entire list to
-        //     get a mutable reference to the reference target.
-        Some(unsafe { Pin::new_unchecked(Frt::from_node(ent_node).as_mut()) })
+        //     Since we own an `Lrt::Ref`, we can mutably borrow the entire
+        //     list to get a mutable reference to the reference target.
+        Some(unsafe { Lrt::borrow_mut(ent_node) })
     }
 
     /// Move the cursor to the next element.
@@ -458,7 +454,7 @@ where
     pub fn move_next(&mut self) {
         if let Some(ent_node) = self.get_ptr() {
             // SAFETY: `ent_node` was taken from the list, and a list ensures
-            //     those were acquired via `Frt::acquire()` and thus valid
+            //     those were acquired via `Lrt::acquire()` and thus valid
             //     until released. Since cursors always move forward, the entry
             //     is valid until destruction of the cursor.
             self.pos = unsafe {
@@ -480,13 +476,13 @@ where
     /// unmodified.
     pub fn try_link(
         &mut self,
-        ent: Pin<Ref>,
-    ) -> Result<Pin<&Ref::Target>, Pin<Ref>> {
+        ent: Pin<Lrt::Ref>,
+    ) -> Result<Pin<&Lrt::Target>, Pin<Lrt::Ref>> {
         self.link(ent).map(|v| {
             // SAFETY: The entry is convertible to a pinned shared reference
             //     for as long as we do not call `Ref::release()`. By holding
             //     `self`, we prevent `Cursor` from doing so.
-            unsafe { Pin::new_unchecked(v.as_ref()) }
+            unsafe { Lrt::borrow(v) }
         })
     }
 
@@ -496,14 +492,14 @@ where
     /// `None`. Otherwise, the element is unlinked and ownership
     /// transferred to the caller. The cursor now points to the following
     /// element.
-    pub fn unlink(&mut self) -> Option<Pin<Ref>> {
+    pub fn unlink(&mut self) -> Option<Pin<Lrt::Ref>> {
         let ent_node = self.get_ptr()?;
 
         // Borrow `ent_node` as reference. Update the list position to skip
         // the node and then update the node to be marked as unlinked.
         {
             // SAFETY: `ent_node` was taken from the list, and a list ensures
-            //     those were acquired via `Frt::acquire()` and thus valid
+            //     those were acquired via `Lrt::acquire()` and thus valid
             //     until released. A temporary conversion to reference is thus
             //     safe.
             let ent_node_r = unsafe { ent_node.as_ref() };
@@ -523,50 +519,45 @@ where
             ent_node_r.next.store(0, atomic::Relaxed);
         }
 
-        // SAFETY: `ent_node` was taken from the list, and a list
-        //     guarantees it was acquired via `Frt::acquire()` and thus
-        //     embedded in a reference target and valid until release.
-        let ent_deref = unsafe { Frt::from_node(ent_node) };
-        // SAFETY: `ent_deref` was taken from the list, and thus guaranteed
-        //     to be acquired via `Frt::acquire()`. Since the previous entry
+        // SAFETY: `ent_node` was taken from the list, and thus guaranteed
+        //     to be acquired via `Lrt::acquire()`. Since the previous entry
         //     was updated to point to the next, the pointer is no longer
         //     stored in the list.
-        Some(unsafe { Frt::release(ent_deref) })
+        Some(unsafe { Lrt::release(ent_node) })
     }
 }
 
 // Convenience helpers
-impl<'list, Ref, Frt> CursorMut<'list, Ref, Frt>
+impl<'list, Lrt> CursorMut<'list, Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Consume the cursor and return the element it pointed to.
     ///
     /// Works like [`Self::get()`], but consumes the cursor and can thus
     /// return a borrow for `'list`.
-    pub fn get_consume(self) -> Option<Pin<&'list Ref::Target>> {
+    pub fn get_consume(self) -> Option<Pin<&'list Lrt::Target>> {
         let ent_node = self.get_ptr()?;
         drop(self);
         // SAFETY: `ent_node` was taken from the list, and a list ensures
-        //     those were acquired via `Frt::acquire()` and thus valid
+        //     those were acquired via `Lrt::acquire()` and thus valid
         //     until released. Since the cursor was consumed, the entry is
         //     valid for `'list`.
-        Some(unsafe { Pin::new_unchecked(Frt::from_node(ent_node).as_ref()) })
+        Some(unsafe { Lrt::borrow(ent_node) })
     }
 
     /// Get a reference to the element the cursor points to and move forward.
     ///
     /// Works like [`Self::get()`] but calls [`Self::move_next()`] afterwards,
     /// thus returning a longer borrow.
-    pub fn get_and_move_next(&mut self) -> Option<Pin<&'list Ref::Target>> {
+    pub fn get_and_move_next(&mut self) -> Option<Pin<&'list Lrt::Target>> {
         let ent_node = self.get_ptr()?;
         self.move_next();
         // SAFETY: `ent_node` was taken from the list, and a list ensures
-        //     those were acquired via `Frt::acquire()` and thus valid
+        //     those were acquired via `Lrt::acquire()` and thus valid
         //     until released. Since the cursor was moved forward and can never
         //     move backwards, this node is valid for `'list`.
-        Some(unsafe { Pin::new_unchecked(Frt::from_node(ent_node).as_ref()) })
+        Some(unsafe { Lrt::borrow(ent_node) })
     }
 
     /// Link a node at the cursor position, consuming the cursor.
@@ -575,8 +566,8 @@ where
     /// a longer borrow.
     pub fn try_link_consume(
         mut self,
-        ent: Pin<Ref>,
-    ) -> Result<Pin<&'list Ref::Target>, Pin<Ref>> {
+        ent: Pin<Lrt::Ref>,
+    ) -> Result<Pin<&'list Lrt::Target>, Pin<Lrt::Ref>> {
         match self.link(ent) {
             Ok(v) => {
                 drop(self);
@@ -584,7 +575,7 @@ where
                 //     reference for as long as we do not call
                 //     `Ref::release()`. By dropping `self`, no-one can modify
                 //     the tree for as long as `'list`.
-                Ok(unsafe { Pin::new_unchecked(v.as_ref()) })
+                Ok(unsafe { Lrt::borrow(v) })
             },
             Err(v) => Err(v),
         }
@@ -601,7 +592,7 @@ mod test {
         node: Node,
     }
 
-    impl_pin_node!(Entry, node);
+    util::field::impl_pin_field!(Entry, node, Node);
 
     // Create a list that stores shared references. This allows access to
     // the elements even if stored in the list. Once the list is dropped,
@@ -611,7 +602,7 @@ mod test {
         let mut e0 = core::pin::pin!(Entry { key: 0, ..Default::default() });
         let mut e1 = core::pin::pin!(Entry { key: 1, ..Default::default() });
 
-        let mut list: List<&Entry, node_of!(Entry, node)> = List::new();
+        let mut list: List<node_of!(&Entry, node)> = List::new();
 
         assert!(list.is_empty());
         assert!(!e0.node.is_linked());
@@ -653,7 +644,7 @@ mod test {
         let mut e0 = core::pin::pin!(Entry { key: 0, ..Default::default() });
         let mut e1 = core::pin::pin!(Entry { key: 1, ..Default::default() });
 
-        let mut list: List<&mut Entry, node_of!(Entry, node)> = List::new();
+        let mut list: List<node_of!(&mut Entry, node)> = List::new();
 
         assert!(list.is_empty());
         assert!(!e0.node.is_linked());

@@ -46,23 +46,18 @@ use crate::util;
 ///
 /// [`List`] uses the same nodes as [`util::slist::Node`], and thus can move
 /// nodes from one to another.
-pub struct List<Ref, Frt>
+pub struct List<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     // Pointer to the first node in the list. Set to `END` if the list is
     // empty. All other pointers always represent a pinned owned reference to
     // an entry, gained via `Ref::pin_into_deref()`.
     first: atomic::Atomic<usize>,
-    // Lists effectively own their entries of type `Ref`. Ensure this is
-    // reflected in this type.
-    _ref: core::marker::PhantomData<Ref>,
     // Different lists can store entries of type `Ref` via different nodes. By
     // pinning the field-representing-type, it is always clear which node a
-    // list is using. `Field<T>` is prohibited from exposing any subtyping, so
-    // we can directly embed `Frt` here.
-    _frt: core::marker::PhantomData<Frt>,
+    // list is using.
+    _lrt: core::marker::PhantomData<Lrt>,
 }
 
 /// Metadata required for elements of a [`List`].
@@ -74,34 +69,19 @@ pub type Node = util::slist::Node;
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! util_lll_impl_pin_node {
-    ($base:ty, $field:ident $(,)?) => {
-        $crate::util::field::impl_pin_field!{$base, $field, $crate::util::lll::Node}
-    }
-}
-
-#[doc(hidden)]
-#[macro_export]
 macro_rules! util_lll_node_of {
-    ($base:ty, $field:ident $(,)?) => {
-        $crate::util::field::typed_field_of!{$base, $field, $crate::util::lll::Node}
+    ($ref:ty, $field:ident $(,)?) => {
+        $crate::util::intrusive::link_of!{$ref, $field, $crate::util::lll::Node}
     }
 }
 
-/// Alias of [`impl_pin_field!()`](util::field::impl_pin_field) with a fixed
-/// member field type of [`Node`].
-#[doc(inline)]
-pub use util_lll_impl_pin_node as impl_pin_node;
-
-/// Alias of [`typed_field_of!()`](util::field::typed_field_of) with a fixed
-/// member field type of [`Node`].
+/// Alias of [`link_of!()`](util::intrusive::link_of) for [`Node`] members.
 #[doc(inline)]
 pub use util_lll_node_of as node_of;
 
-impl<Ref, Frt> List<Ref, Frt>
+impl<Lrt> List<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Create a new empty list.
     ///
@@ -110,8 +90,7 @@ where
     pub const fn new() -> Self {
         Self {
             first: atomic::Atomic::new(util::slist::END),
-            _ref: core::marker::PhantomData,
-            _frt: core::marker::PhantomData,
+            _lrt: core::marker::PhantomData,
         }
     }
 
@@ -139,12 +118,12 @@ where
     /// [`List::clear()`].
     pub fn try_link_front(
         &self,
-        ent: Pin<Ref>,
-    ) -> Result<(), Pin<Ref>> {
-        let (ent_deref, ent_node) = Frt::acquire(ent);
+        ent: Pin<Lrt::Ref>,
+    ) -> Result<(), Pin<Lrt::Ref>> {
+        let ent_node = Lrt::acquire(ent);
 
-        // SAFETY: `ent_node` points to a valid immutable node as long as we
-        //     hold `ent_deref`.
+        // SAFETY: `ent_node` is convertible to a shared reference as long as
+        //     we do not call `Lrt::release()`.
         let ent_node_r = unsafe { ent_node.as_ref() };
 
         let mut first = self.first.load(atomic::Relaxed);
@@ -156,9 +135,9 @@ where
             // `ent` is already linked into another list, return ownership to
             // the caller wrapped in an `Err`.
             //
-            // SAFETY: `ent_deref` was just acquired from `pin_into_deref()`
+            // SAFETY: `ent_node` was just acquired from `pin_into_deref()`
             //     and is no longer used afterwards.
-            return Err(unsafe { Frt::release(ent_deref) });
+            return Err(unsafe { Lrt::release(ent_node) });
         };
 
         // Expose provenance, until `Atomic<*mut T>` is here.
@@ -195,28 +174,33 @@ where
     ///
     /// This ensures an acquire memory barrier matching the release memory
     /// barrier in [`List::try_link_front()`].
-    pub fn clear(&self) -> util::slist::List<Ref, Frt> {
-        util::slist::List::with(
-            // Use acquire barrier to ensure writes to the nodes are visible,
-            // if done before they were linked. The matching release barrier is
-            // in `Self::try_link_front()`.
-            self.first.xchg(util::slist::END, atomic::Acquire),
-        )
+    pub fn clear(&self) -> util::slist::List<Lrt> {
+        // SAFETY: By clearing `self.first` we acquire the list. Since it uses
+        //     the same nodes as `slist`, we can create one from it.
+        unsafe {
+            util::slist::List::with(
+                // Use acquire barrier to ensure writes to the nodes are
+                // visible, if done before they were linked. The matching
+                // release barrier is in `Self::try_link_front()`.
+                self.first.xchg(util::slist::END, atomic::Acquire),
+            )
+        }
     }
 }
 
 // Convenience helpers
-impl<Ref, Frt> List<Ref, Frt>
+impl<Lrt> List<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Link a node at the front of a list.
     ///
     /// Works like [`List::try_link_front()`] but warns on error and leaks the
     /// entry.
-    pub fn link_front(&self, ent: Pin<Ref>) {
+    pub fn link_front(&self, ent: Pin<Lrt::Ref>) {
         self.try_link_front(ent).unwrap_or_else(|v| {
+            // Warn if the entry is already used elsewhere, and then leak the
+            // reference to avoid cascading failures.
             kernel::warn_on!(true);
             core::mem::forget(v);
         })
@@ -225,27 +209,26 @@ where
 
 // SAFETY: `List` can be sent along CPUs, as long as the data it contains can
 //     also be sent along. `List` never cares about the CPU it is called on.
-unsafe impl<Ref, Frt> Send for List<Ref, Frt>
+unsafe impl<Lrt> Send for List<Lrt>
 where
-    Ref: Send + util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
+    Lrt::Ref: Send,
 {
 }
 
 // SAFETY: `List` is meant to be shared across CPUs and safely handles parallel
 //     accesses through atomics. It never hands out references to stored
 //     elements, so it is `Sync` as long as the data it sends along is `Send`.
-unsafe impl<Ref, Frt> Sync for List<Ref, Frt>
+unsafe impl<Lrt> Sync for List<Lrt>
 where
-    Ref: Send + util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
+    Lrt::Ref: Send,
 {
 }
 
-impl<Ref, Frt> core::default::Default for List<Ref, Frt>
+impl<Lrt> core::default::Default for List<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Return a new empty list.
     fn default() -> Self {
@@ -253,10 +236,9 @@ where
     }
 }
 
-impl<Ref, Frt> core::ops::Drop for List<Ref, Frt>
+impl<Lrt> core::ops::Drop for List<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Clear a list before dropping it.
     ///
@@ -278,14 +260,14 @@ mod test {
         node: Node,
     }
 
-    impl_pin_node!(Entry, node);
+    util::field::impl_pin_field!(Entry, node, Node);
 
     #[test]
     fn test_basic() {
         let e0 = core::pin::pin!(Entry { key: 0, ..Default::default() });
         let e1 = core::pin::pin!(Entry { key: 1, ..Default::default() });
 
-        let list: List<&Entry, node_of!(Entry, node)> = List::new();
+        let list: List<node_of!(&Entry, node)> = List::new();
 
         assert!(list.is_empty());
         assert!(!e0.node.is_linked());
