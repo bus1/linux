@@ -16,8 +16,22 @@ use kernel::prelude::*;
 /// authoritative. As such, implementing this trait on *any* type must be
 /// subject to this condition.
 ///
+/// All subtypes of an implementation always carry the same trait
+/// implementation. That is, an implementing type cannot be coerced into
+/// another type with a deviating implementation.
+///
 /// Commonly, this trait is automatically implemented on Field Representing
 /// Types (FRTs) by the compiler, or manually via [`impl_field`].
+///
+/// # Unsized Types
+///
+/// All involved types currently must be `Sized`. In particular, the
+/// implementing type `Self`, `Field::Base`, and `Field::Type` must be `Sized`.
+///
+/// The trait could allow unsized types, but the helpers that convert from base
+/// to field pointer cannot calculate pointer metadata without external
+/// input. Unless there is a solid design to pass around metadata, this is left
+/// for a future extension.
 ///
 /// ## Safety
 ///
@@ -26,11 +40,9 @@ use kernel::prelude::*;
 /// offset `OFFSET`, and this value is represented by a direct member field
 /// on [`Self::Base`].
 ///
-/// Furthermore, implementing types must not exhibit any subtype relationship.
-/// In particular, if this is implemented on a type using generics, the type
-/// must be invariant over each generic parameter. If other subtype
-/// relationships are used (e.g., universal lifetimes, `Fn*` traits with
-/// lifetimes), those must not be reflected in the implementing type.
+/// Any subtypes of the implementing type must have an equal trait
+/// implementation. Type coercion must never lead to a deviating trait
+/// implementation.
 pub unsafe trait Field: Send + Sync + Copy {
     /// Base containing type this field exists in.
     type Base;
@@ -70,7 +82,7 @@ pub unsafe trait PinField: Field {
 /// in the standard library can circumvent this limitation. Without compiler
 /// support, auto-generation of such types requires other external enumerations
 /// that make usage needlessly complex. Hence, this uses the field offset
-/// as distinguisher, and this limits implementations.
+/// as distinguisher, and thus limits the implementation.
 #[repr(C, packed)]
 pub struct FieldRepr<Base: ?Sized, Type: ?Sized, const OFFSET: usize> {
     _base: [*mut Base; 0],
@@ -78,12 +90,12 @@ pub struct FieldRepr<Base: ?Sized, Type: ?Sized, const OFFSET: usize> {
     _offset: [(); OFFSET],
 }
 
-// SAFETY: `FieldRepr` doesn't contain any values.
+// SAFETY: `FieldRepr` doesn't contain any values. No subtypes exist.
 unsafe impl<Base: ?Sized, Type: ?Sized, const OFFSET: usize> Send
 for FieldRepr<Base, Type, OFFSET> {
 }
 
-// SAFETY: `FieldRepr` doesn't contain any values.
+// SAFETY: `FieldRepr` doesn't contain any values. No subtypes exist.
 unsafe impl<Base: ?Sized, Type: ?Sized, const OFFSET: usize> Sync
 for FieldRepr<Base, Type, OFFSET> {
 }
@@ -159,8 +171,7 @@ macro_rules! util_field_impl_field {
     ($base:ty, $field:ident, $type:ty $(,)?) => {
         // SAFETY: `FieldRepr` exposes no variance. `$field` is verified to be
         //     a member of `$base` via `offset_of!()`, and correctness of its
-        //     type is verified apart from coercions (which is delegated to the
-        //     caller).
+        //     type is verified apart from coercions (which we accept).
         unsafe impl $crate::util::field::Field
         for $crate::util::field::FieldRepr<
             $base,
@@ -315,16 +326,5 @@ mod test {
         assert!(core::ptr::eq(o_p, b_p));
         assert_eq!(*f_r, 11);
         assert_eq!(b_r.b, 11);
-    }
-
-    // Verify that unsized types can be used with fields.
-    #[test]
-    fn field_unsized() {
-        fn _unused<Frt0, Frt1>()
-        where
-            Frt0: Field<Base = [u8], Type = [u8]>,
-            Frt1: PinField<Base = [u8], Type = [u8]>,
-        {
-        }
     }
 }
