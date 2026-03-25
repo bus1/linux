@@ -105,14 +105,17 @@ pub struct Node {
 
 enum CursorPos {
     Empty,
+    Front(NonNull<Node>),
     At(NonNull<Node>),
+    Back(NonNull<Node>),
 }
 
 /// Mutable cursor over entries of an RB-Tree.
 ///
-/// This cursor either points at an empty tree, or directly at a node in a
-/// non-empty tree. The cursor can be moved back and forth, and elements can
-/// be inserted and removed at will.
+/// This cursor either points at an empty tree, directly at a node in a
+/// non-empty tree, before the first node, or after the last node. The cursor
+/// can be moved back and forth, and elements can be inserted and removed at
+/// will.
 pub struct CursorMut<'tree, Lrt>
 where
     Lrt: util::intrusive::Link<Node>,
@@ -235,23 +238,68 @@ where
         v == self.as_owner()
     }
 
-    /// Try creating a mutable cursor to an explicit element.
+    /// Create a mutable cursor at the first element.
     ///
-    /// This tries to create a [`CursorMut`] for the given element. If the
+    /// The new cursor will point to the first element. If the tree is empty,
+    /// the cursor points to no element at all.
+    pub fn cursor_mut_first(
+        mut self: Pin<&mut Self>,
+    ) -> CursorMut<'_, Lrt> {
+        // SAFETY: `rb_first()` requires a pointer to a valid root, pointing to
+        // valid nodes. This invariant is maintained by `Tree`.
+        let pos = if let Some(v) = NonNull::new(unsafe {
+            kernel::bindings::rb_first(
+                self.as_mut().root_mut(),
+            )
+        }) {
+            // SAFETY: `v` points to a valid entry in the tree, thus it is
+            // embedded in a `Node`.
+            CursorPos::At(unsafe { Node::from_rb(v) })
+        } else {
+            CursorPos::Empty
+        };
+
+        CursorMut {
+            tree: self,
+            pos,
+        }
+    }
+
+    /// Create a mutable cursor at the last element.
+    ///
+    /// The new cursor will point to the last element. If the tree is empty,
+    /// the cursor points to no element at all.
+    pub fn cursor_mut_last(
+        mut self: Pin<&mut Self>,
+    ) -> CursorMut<'_, Lrt> {
+        // SAFETY: `rb_last()` requires a pointer to a valid root, pointing to
+        // valid nodes. This invariant is maintained by `Tree`.
+        let pos = if let Some(v) = NonNull::new(unsafe {
+            kernel::bindings::rb_last(
+                self.as_mut().root_mut(),
+            )
+        }) {
+            // SAFETY: `v` points to a valid entry in the tree, thus it is
+            // embedded in a `Node`.
+            CursorPos::At(unsafe { Node::from_rb(v) })
+        } else {
+            CursorPos::Empty
+        };
+
+        CursorMut {
+            tree: self,
+            pos,
+        }
+    }
+
+    /// Try creating a mutable cursor at an explicit element.
+    ///
+    /// This tries to create a [`CursorMut`] at the given element. If the
     /// element is not linked in this tree, this will return `None` instead.
-    pub fn try_claim_mut<'tree, 'ent>(
-        mut self: Pin<&'tree mut Self>,
-        ent_target: Pin<&'ent Lrt::Target>,
-    ) -> Option<CursorMut<'tree, Lrt>>
-    where
-        // XXX: For now we require that entries outlive any temporary claims.
-        //     This is not a hard requirement, but we need it for pointer
-        //     provenance.
-        //     We should rather get the correct provenance from the pointer
-        //     stored in the parent (or root). This code should be eliminated
-        //     except under miri, anyway.
-        'ent: 'tree,
-    {
+    pub fn try_cursor_mut_at(
+        mut self: Pin<&mut Self>,
+        ent_target: Pin<&Lrt::Target>,
+    ) -> Option<CursorMut<'_, Lrt>> {
         let ent_node = Lrt::project(&ent_target);
         // SAFETY: `end_node` points to a valid allocation.
         let v = unsafe {
@@ -373,18 +421,15 @@ impl<Lrt> Tree<Lrt>
 where
     Lrt: util::intrusive::Link<Node>,
 {
-    /// Create a mutable cursor to an explicit element.
+    /// Create a mutable cursor at an explicit element.
     ///
-    /// Works like [`Tree::try_cursor_mut()`] but panics if the element is not
-    /// linked into this tree.
-    pub fn claim_mut<'tree, 'ent>(
-        self: Pin<&'tree mut Self>,
-        ent_target: Pin<&'ent Lrt::Target>,
-    ) -> CursorMut<'tree, Lrt>
-    where
-        'ent: 'tree,
-    {
-        self.try_claim_mut(ent_target).unwrap_or_else(
+    /// Works like [`Tree::try_cursor_mut_at()`] but panics if the element is
+    /// not linked into this tree.
+    pub fn cursor_mut_at(
+        self: Pin<&mut Self>,
+        ent_target: Pin<&Lrt::Target>,
+    ) -> CursorMut<'_, Lrt> {
+        self.try_cursor_mut_at(ent_target).unwrap_or_else(
             || Self::panic_claim(ent_target),
         )
     }
@@ -420,6 +465,34 @@ where
         self.find_slot_by(
             |other| cmp_fn(&ent, other),
         ).try_link(ent)
+    }
+
+    /// Try unlinking a specific element from the tree.
+    ///
+    /// This chains [`Tree::try_cursor_mut_at()`] and [`Slot::try_unlink()`].
+    ///
+    /// This returns the element if it was unlinked from the tree, or `None` if
+    /// the element was not linked into this tree.
+    pub fn try_unlink(
+        self: Pin<&mut Self>,
+        ent_target: Pin<&Lrt::Target>,
+    ) -> Option<Pin<Lrt::Ref>> {
+        self.try_cursor_mut_at(ent_target).and_then(|v| {
+            v.try_unlink()
+        })
+    }
+
+    /// Unlink a specific element from the tree.
+    ///
+    /// Works like [`Tree::try_unlink()`] but panics if the entry was not
+    /// linked into this tree.
+    pub fn unlink(
+        self: Pin<&mut Self>,
+        ent_target: Pin<&Lrt::Target>,
+    ) -> Pin<Lrt::Ref> {
+        self.try_unlink(ent_target).unwrap_or_else(
+            || core::panic!("attempting to unlink foreign entry"),
+        )
     }
 
     /// Remove all entries from a tree.
@@ -661,25 +734,27 @@ where
     ///
     /// Move the cursor to point to the next entry. If the tree is empty, or if
     /// the cursor points to the last element, this is a no-op.
-    ///
-    /// Returns `true` if, any only if, the cursor was actually moved.
-    pub fn move_next(&mut self) -> bool {
-        let CursorPos::At(ent_node) = self.pos else {
-            return false;
-        };
-
-        // SAFETY: `ent_node` points to a valid entry in the tree.
-        if let Some(next) = NonNull::new(unsafe {
-            kernel::bindings::rb_next(
-                ent_node.as_ref().bindings.get(),
-            )
-        }) {
-            // SAFETY: `next` points to a valid entry in the tree, thus it is
-            //     embedded in a `Node`.
-            self.pos = CursorPos::At(unsafe { Node::from_rb(next) });
-            true
-        } else {
-            false
+    pub fn move_next(&mut self) {
+        match self.pos {
+            CursorPos::Empty => {},
+            CursorPos::Front(ent_node) => {
+                self.pos = CursorPos::At(ent_node);
+            },
+            CursorPos::Back(_ent_node) => {},
+            CursorPos::At(ent_node) => {
+                // SAFETY: `ent_node` points to a valid entry in the tree.
+                if let Some(v) = NonNull::new(unsafe {
+                    kernel::bindings::rb_next(
+                        ent_node.as_ref().bindings.get(),
+                    )
+                }) {
+                    // SAFETY: `v` points to a valid entry in the tree, thus
+                    // it is embedded in a `Node`.
+                    self.pos = CursorPos::At(unsafe { Node::from_rb(v) });
+                } else {
+                    self.pos = CursorPos::Back(ent_node);
+                }
+            },
         }
     }
 
@@ -687,64 +762,102 @@ where
     ///
     /// Move the cursor to point to the previous entry. If the tree is empty,
     /// or if the cursor points to the first element, this is a no-op.
-    ///
-    /// Returns `true` if, any only if, the cursor was actually moved.
-    pub fn move_prev(&mut self) -> bool {
-        let CursorPos::At(ent_node) = self.pos else {
-            return false;
-        };
-
-        // SAFETY: `ent_node` points to a valid entry in the tree.
-        if let Some(next) = NonNull::new(unsafe {
-            kernel::bindings::rb_prev(
-                ent_node.as_ref().bindings.get(),
-            )
-        }) {
-            // SAFETY: `prev` points to a valid entry in the tree, thus it is
-            //     embedded in a `Node`.
-            self.pos = CursorPos::At(unsafe { Node::from_rb(next) });
-            true
-        } else {
-            false
+    pub fn move_prev(&mut self) {
+        match self.pos {
+            CursorPos::Empty => {},
+            CursorPos::Front(_ent_node) => {},
+            CursorPos::Back(ent_node) => {
+                self.pos = CursorPos::At(ent_node);
+            },
+            CursorPos::At(ent_node) => {
+                // SAFETY: `ent_node` points to a valid entry in the tree.
+                if let Some(v) = NonNull::new(unsafe {
+                    kernel::bindings::rb_prev(
+                        ent_node.as_ref().bindings.get(),
+                    )
+                }) {
+                    // SAFETY: `v` points to a valid entry in the tree, thus
+                    // it is embedded in a `Node`.
+                    self.pos = CursorPos::At(unsafe { Node::from_rb(v) });
+                } else {
+                    self.pos = CursorPos::Front(ent_node);
+                }
+            },
         }
     }
 
     /// Move to the next entry, trying to unlink the current entry first.
     ///
-    /// If the tree is empty, this is a no-op and returns `None`. Otherwise,
-    /// the entry at the cursor is unlinked and is returned together with the
-    /// result of [`Self::move_next()`].
-    pub fn move_next_try_unlink(&mut self) -> Option<(bool, Pin<Lrt::Ref>)> {
-        let CursorPos::At(ent_node) = self.pos else {
-            return None;
-        };
+    /// If the cursor points to an element, the element is unlinked and
+    /// returned. Otherwise, `None` is returned. In all cases, the cursor is
+    /// moved to point to the next element.
+    pub fn try_unlink_and_move_next(&mut self) -> Option<Pin<Lrt::Ref>> {
+        if let CursorPos::At(ent_node) = self.pos {
+            // SAFETY: `ent_node` points to a valid entry in the tree.
+            self.pos = if let Some(v) = NonNull::new(unsafe {
+                kernel::bindings::rb_next(
+                    ent_node.as_ref().bindings.get(),
+                )
+            }) {
+                // SAFETY: `v` points to a valid entry in the tree, thus
+                // it is embedded in a `Node`.
+                CursorPos::At(unsafe { Node::from_rb(v) })
+            } else if let Some(v) = NonNull::new(unsafe {
+                kernel::bindings::rb_prev(
+                    ent_node.as_ref().bindings.get(),
+                )
+            }) {
+                // SAFETY: `v` points to a valid entry in the tree, thus
+                // it is embedded in a `Node`.
+                CursorPos::Back(unsafe { Node::from_rb(v) })
+            } else {
+                CursorPos::Empty
+            };
 
-        let r = self.move_next();
-        if !r && !self.move_prev() {
-            self.pos = CursorPos::Empty;
+            // SAFETY: `ent_node` is a valid entry in `tree` and no longer
+            // referenced by the cursor.
+            Some(unsafe { Self::unlink_at(self.tree.as_mut(), ent_node) })
+        } else {
+            self.move_next();
+            None
         }
-
-        // SAFETY: `ent_node` is a valid entry in `tree`.
-        Some((r, unsafe { Self::unlink_at(self.tree.as_mut(), ent_node) }))
     }
 
     /// Move to the previous entry, trying to unlink the current entry first.
     ///
-    /// If the tree is empty, this is a no-op and returns `None`. Otherwise,
-    /// the entry at the cursor is unlinked and is returned together with the
-    /// result of [`Self::move_prev()`].
-    pub fn move_prev_try_unlink(&mut self) -> Option<(bool, Pin<Lrt::Ref>)> {
-        let CursorPos::At(ent_node) = self.pos else {
-            return None;
-        };
+    /// If the cursor points to an element, the element is unlinked and
+    /// returned. Otherwise, `None` is returned. In all cases, the cursor is
+    /// moved to point to the previous element.
+    pub fn try_unlink_and_move_prev(&mut self) -> Option<Pin<Lrt::Ref>> {
+        if let CursorPos::At(ent_node) = self.pos {
+            // SAFETY: `ent_node` points to a valid entry in the tree.
+            self.pos = if let Some(v) = NonNull::new(unsafe {
+                kernel::bindings::rb_prev(
+                    ent_node.as_ref().bindings.get(),
+                )
+            }) {
+                // SAFETY: `v` points to a valid entry in the tree, thus
+                // it is embedded in a `Node`.
+                CursorPos::At(unsafe { Node::from_rb(v) })
+            } else if let Some(v) = NonNull::new(unsafe {
+                kernel::bindings::rb_next(
+                    ent_node.as_ref().bindings.get(),
+                )
+            }) {
+                // SAFETY: `v` points to a valid entry in the tree, thus
+                // it is embedded in a `Node`.
+                CursorPos::Front(unsafe { Node::from_rb(v) })
+            } else {
+                CursorPos::Empty
+            };
 
-        let r = self.move_prev();
-        if !r && !self.move_next() {
-            self.pos = CursorPos::Empty;
+            // SAFETY: `ent_node` is a valid entry in `tree` and no longer
+            // referenced by the cursor.
+            Some(unsafe { Self::unlink_at(self.tree.as_mut(), ent_node) })
+        } else {
+            self.move_prev();
+            None
         }
-
-        // SAFETY: `ent_node` is a valid entry in `tree`.
-        Some((r, unsafe { Self::unlink_at(self.tree.as_mut(), ent_node) }))
     }
 
     /// Try unlinking the current entry from the tree, consuming the cursor.
@@ -772,20 +885,20 @@ where
 {
     /// Move to the next entry, unlinking the current entry first.
     ///
-    /// Works like [`Self::move_next_try_unlink()`] but panics if the tree is
-    /// empty.
-    pub fn move_next_unlink(&mut self) -> (bool, Pin<Lrt::Ref>) {
-        self.move_next_try_unlink().unwrap_or_else(
+    /// Works like [`Self::try_unlink_and_move_next()`] but panics if the tree
+    /// is empty.
+    pub fn unlink_and_move_next(&mut self) -> Pin<Lrt::Ref> {
+        self.try_unlink_and_move_next().unwrap_or_else(
             || core::panic!("attempting to unlink from an empty tree"),
         )
     }
 
     /// Move to the previous entry, unlinking the current entry first.
     ///
-    /// Works like [`Self::move_prev_try_unlink()`] but panics if the tree is
-    /// empty.
-    pub fn move_prev_unlink(&mut self) -> (bool, Pin<Lrt::Ref>) {
-        self.move_prev_try_unlink().unwrap_or_else(
+    /// Works like [`Self::try_unlink_and_move_prev()`] but panics if the tree
+    /// is empty.
+    pub fn unlink_and_move_prev(&mut self) -> Pin<Lrt::Ref> {
+        self.try_unlink_and_move_prev().unwrap_or_else(
             || core::panic!("attempting to unlink from an empty tree"),
         )
     }

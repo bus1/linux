@@ -476,11 +476,9 @@ where
 {
     let ent = util::arc_pin(Arc::drop_unless_unique(ent)?);
 
-    if let Some(cur) = tree.try_claim_mut(ent.as_ref()) {
-        if let Some(v) = cur.try_unlink() {
-            let _v = Arc::into_raw(util::arc_unpin(v));
-            *tree_len -= 1;
-        }
+    if let Some(v) = tree.try_unlink(ent.as_ref()) {
+        let _v = Arc::into_raw(util::arc_unpin(v));
+        *tree_len -= 1;
     }
 
     Some(util::arc_unpin(ent))
