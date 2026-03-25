@@ -109,7 +109,7 @@ pub struct Acct {
 }
 
 struct AcctInner {
-    users: rb::Tree<Arc<User>, rb::node_of!(User, acct_rb)>,
+    users: rb::Tree<rb::node_of!(Arc<User>, acct_rb)>,
     users_len: usize,
     maxima: [Value; N_SLOTS],
 }
@@ -149,11 +149,10 @@ struct User {
     inner: kernel::sync::Mutex<UserInner>,
 }
 
-// SAFETY: `acct_rb` is structurally pinned and of type `Node`.
-rb::impl_pin_node!(User, acct_rb);
+util::field::impl_pin_field!(User, acct_rb, rb::Node);
 
 struct UserInner {
-    quotas: rb::Tree<Arc<Quota>, rb::node_of!(Quota, user_rb)>,
+    quotas: rb::Tree<rb::node_of!(Arc<Quota>, user_rb)>,
     quotas_len: usize,
     maxima: [Value; N_SLOTS],
     claim: Claim,
@@ -172,10 +171,10 @@ struct Quota {
 }
 
 // SAFETY: `user_rb` is structurally pinned and of type `Node`.
-rb::impl_pin_node!(Quota, user_rb);
+util::field::impl_pin_field!(Quota, user_rb, rb::Node);
 
 struct QuotaInner {
-    traces: rb::Tree<Arc<Trace>, rb::node_of!(Trace, quota_rb)>,
+    traces: rb::Tree<rb::node_of!(Arc<Trace>, quota_rb)>,
     traces_len: usize,
     claim: Claim,
 }
@@ -193,7 +192,7 @@ struct Trace {
 }
 
 // SAFETY: `quota_rb` is structurally pinned and of type `Node`.
-rb::impl_pin_node!(Trace, quota_rb);
+util::field::impl_pin_field!(Trace, quota_rb, rb::Node);
 
 struct TraceInner {
     claim: Claim,
@@ -431,14 +430,14 @@ where
 /// `Arc`s. One that is returned to the caller, and one that is stored in the
 /// lookup tree. The caller must ensure to use `drop_or_unlink()` when dropping
 /// the last reference, or otherwise merge those `Arc`s back together.
-unsafe fn find_or_insert<T, Frt, CmpFn, NewFn>(
-    tree: Pin<&mut rb::Tree<Arc<T>, Frt>>,
+unsafe fn find_or_insert<T, Lrt, CmpFn, NewFn>(
+    tree: Pin<&mut rb::Tree<Lrt>>,
     tree_len: &mut usize,
     cmp_fn: CmpFn,
     mut new_fn: NewFn,
 ) -> Result<Arc<T>, AllocError>
 where
-    Frt: util::intrusive::Field<Arc<T>, Node = rb::Node>,
+    Lrt: util::intrusive::Link<rb::Node, Ref = Arc<T>, Target = T>,
     CmpFn: FnMut(Pin<&T>) -> core::cmp::Ordering,
     NewFn: FnMut() -> Result<Arc<T>, AllocError>,
 {
@@ -467,13 +466,13 @@ where
 /// The `Arc` stored in the tree is leaked via `Arc::into_raw()`. To prevent
 /// this leak, the caller should have stored a shared reference in the tree
 /// in the first place.
-fn drop_or_unlink<T, Frt>(
-    tree: Pin<&mut rb::Tree<Arc<T>, Frt>>,
+fn drop_or_unlink<T, Lrt>(
+    tree: Pin<&mut rb::Tree<Lrt>>,
     tree_len: &mut usize,
     ent: Arc<T>,
 ) -> Option<Arc<T>>
 where
-    Frt: util::intrusive::Field<Arc<T>, Node = rb::Node>,
+    Lrt: util::intrusive::Link<rb::Node, Ref = Arc<T>, Target = T>,
 {
     let ent = util::arc_pin(Arc::drop_unless_unique(ent)?);
 
@@ -591,7 +590,7 @@ impl AcctInner {
     fn unfold_mut(
         self: Pin<&mut Self>,
     ) -> (
-        Pin<&mut rb::Tree<Arc<User>, rb::node_of!(User, acct_rb)>>,
+        Pin<&mut rb::Tree<rb::node_of!(Arc<User>, acct_rb)>>,
         &mut usize,
         &mut [Value; N_SLOTS],
     ) {
@@ -947,7 +946,7 @@ impl UserInner {
     fn unfold_mut(
         self: Pin<&mut Self>,
     ) -> (
-        Pin<&mut rb::Tree<Arc<Quota>, rb::node_of!(Quota, user_rb)>>,
+        Pin<&mut rb::Tree<rb::node_of!(Arc<Quota>, user_rb)>>,
         &mut usize,
         &mut [Value; N_SLOTS],
         &mut Claim,

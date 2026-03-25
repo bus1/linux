@@ -49,10 +49,9 @@ use crate::util;
 /// single tree will use the same member field. But a single element can have
 /// multiple different member fields of type [`Node`], and thus be linked into
 /// multiple different trees simultaneously.
-pub struct Tree<Ref, Frt>
+pub struct Tree<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     // Rb-tree metadata for the entire tree. In their most basic form, this is
     // just a pointer to the root node (but caching variants are an option to
@@ -64,14 +63,10 @@ where
     // pinned. Since pinning is ubiquitious in kernel APIs, this seems like an
     // acceptable price to pay.
     _pin: core::marker::PhantomPinned,
-    // Trees effectively own their entries of type `Ref`. Ensure this is
-    // reflected in this type.
-    _ref: core::marker::PhantomData<Ref>,
     // Different trees can store entries of type `Ref` via different nodes. By
     // pinning the field-representing-type, it is always clear which node a
-    // tree is using. `Field<T>` is prohibited from exposing any subtyping, so
-    // we can directly embed `Frt` here.
-    _frt: core::marker::PhantomData<Frt>,
+    // tree is using.
+    _lrt: core::marker::PhantomData<Lrt>,
 }
 
 /// Red-Black Tree metadata required on each element.
@@ -118,12 +113,11 @@ enum CursorPos {
 /// This cursor either points at an empty tree, or directly at a node in a
 /// non-empty tree. The cursor can be moved back and forth, and elements can
 /// be inserted and removed at will.
-pub struct CursorMut<'tree, Ref, Frt>
+pub struct CursorMut<'tree, Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
-    tree: Pin<&'tree mut Tree<Ref, Frt>>,
+    tree: Pin<&'tree mut Tree<Lrt>>,
     pos: CursorPos,
 }
 
@@ -137,46 +131,30 @@ where
 ///
 /// Slots mutably borrow the tree they reference, and as such allow insertion
 /// of new elements into the tree.
-pub struct Slot<'tree, Ref, Frt>
+pub struct Slot<'tree, Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
-    tree: Pin<&'tree mut Tree<Ref, Frt>>,
+    tree: Pin<&'tree mut Tree<Lrt>>,
     anchor: *mut kernel::bindings::rb_node,
     slot: *mut *mut kernel::bindings::rb_node,
 }
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! util_rb_impl_pin_node {
-    ($base:ty, $field:ident $(,)?) => {
-        $crate::util::field::impl_pin_field!{$base, $field, $crate::util::rb::Node}
-    }
-}
-
-#[doc(hidden)]
-#[macro_export]
 macro_rules! util_rb_node_of {
-    ($base:ty, $field:ident $(,)?) => {
-        $crate::util::field::typed_field_of!{$base, $field, $crate::util::rb::Node}
+    ($ref:ty, $field:ident $(,)?) => {
+        $crate::util::intrusive::link_of!{$ref, $field, $crate::util::rb::Node}
     }
 }
 
-/// Alias of [`impl_pin_field!()`](util::field::impl_pin_field) with a fixed
-/// member field type of [`Node`].
-#[doc(inline)]
-pub use util_rb_impl_pin_node as impl_pin_node;
-
-/// Alias of [`typed_field_of!()`](util::field::typed_field_of) with a fixed
-/// member field type of [`Node`].
+/// Alias of [`link_of!()`](util::intrusive::link_of) for [`Node`] members.
 #[doc(inline)]
 pub use util_rb_node_of as node_of;
 
-impl<Ref, Frt> Tree<Ref, Frt>
+impl<Lrt> Tree<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Create a new empty tree.
     ///
@@ -190,23 +168,16 @@ where
                 rb_node: core::ptr::null_mut(),
             },
             _pin: core::marker::PhantomPinned,
-            _ref: core::marker::PhantomData,
-            _frt: core::marker::PhantomData,
+            _lrt: core::marker::PhantomData,
         }
     }
 
-    fn panic_acquire(v: Pin<Ref>) -> ! {
-        core::panic!(
-            "attempting to link a foreign node: {:?}",
-            core::ptr::from_ref(&*v),
-        );
+    fn panic_acquire(_v: Pin<Lrt::Ref>) -> ! {
+        core::panic!("attempting to link a foreign node");
     }
 
-    fn panic_claim(v: Pin<&Ref::Target>) -> ! {
-        core::panic!(
-            "attempting to claim a foreign node: {:?}",
-            core::ptr::from_ref(&*v),
-        );
+    fn panic_claim(_v: Pin<&Lrt::Target>) -> ! {
+        core::panic!("attempting to claim a foreign node");
     }
 
     // Return the memory address of this tree as an integer. This is used to
@@ -228,36 +199,6 @@ where
     fn root_mut(self: Pin<&mut Self>) -> &mut kernel::bindings::rb_root {
         // SAFETY: `Self.root` is not structurally pinned.
         unsafe { &mut Pin::into_inner_unchecked(self).root }
-    }
-
-    /// Clone a reference from its reference target pointer.
-    ///
-    /// This is only available if the reference implements `Clone`.
-    ///
-    /// ## Safety
-    ///
-    /// The reference target pointer must be a valid value acquired via
-    /// `pin_into_deref()`.
-    unsafe fn clone_entry(
-        ent_deref: NonNull<Ref::Target>,
-    ) -> Pin<Ref>
-    where
-        Pin<Ref>: Clone,
-    {
-        // SAFETY: Delegated to caller.
-        let ent_real: Pin<Ref> = unsafe { util::convert::FromDeref::pin_from_deref(ent_deref) };
-
-        // Prevent `ent_real` from being dropped if
-        // `<Pin<Ref> as Clone>::clone()` panics and unwinds this frame (note
-        // that the kernel does not unwind, yet, though). Leak it in this case,
-        // to ensure tree invariants are not violated.
-        let ent = core::mem::ManuallyDrop::new(ent_real);
-        let r = (*ent).clone();
-        let _ent_deref = util::convert::IntoDeref::pin_into_deref(
-            core::mem::ManuallyDrop::into_inner(ent),
-        );
-
-        r
     }
 
     /// Check whether the tree is empty.
@@ -284,12 +225,10 @@ where
     /// value of this method is stable for at least the lifetime of `self`.
     pub fn contains(
         &self,
-        ent_target: &Ref::Target,
+        ent_target: &Lrt::Target,
     ) -> bool {
-        let ent_deref = util::nonnull_from_ref(&*ent_target);
-        // SAFETY: `ent_deref` points to a valid allocation.
-        let ent_node = unsafe { Frt::to_node(ent_deref) };
-        // SAFETY: `ent_node` points to a valid node.
+        let ent_node = Lrt::project(ent_target);
+        // SAFETY: `ent_node` is convertible to a reference.
         let v = unsafe {
             (*Node::owner(ent_node)).load(atomic::Relaxed)
         };
@@ -300,17 +239,21 @@ where
     ///
     /// This tries to create a [`CursorMut`] for the given element. If the
     /// element is not linked in this tree, this will return `None` instead.
-    pub fn try_claim_mut(
-        mut self: Pin<&mut Self>,
-        ent_target: Pin<&Ref::Target>,
-    ) -> Option<CursorMut<'_, Ref, Frt>> {
-        let ent_deref = util::nonnull_from_ref(&*ent_target);
-        // SAFETY: `ent_deref` points to a valid allocation.
-        let ent_node = unsafe { Frt::to_node(ent_deref) };
-
-        // SAFETY: `end_node` points to a valid allocation. Since atomics are
-        //     transparent wrappers around `UnsafeCell`, they allow any kind of
-        //     aliasing of references.
+    pub fn try_claim_mut<'tree, 'ent>(
+        mut self: Pin<&'tree mut Self>,
+        ent_target: Pin<&'ent Lrt::Target>,
+    ) -> Option<CursorMut<'tree, Lrt>>
+    where
+        // XXX: For now we require that entries outlive any temporary claims.
+        //     This is not a hard requirement, but we need it for pointer
+        //     provenance.
+        //     We should rather get the correct provenance from the pointer
+        //     stored in the parent (or root). This code should be eliminated
+        //     except under miri, anyway.
+        'ent: 'tree,
+    {
+        let ent_node = Lrt::project(&ent_target);
+        // SAFETY: `end_node` points to a valid allocation.
         let v = unsafe {
             (*Node::owner(ent_node)).load(atomic::Relaxed)
         };
@@ -336,9 +279,9 @@ where
     pub fn find_slot_by<CmpFn>(
         mut self: Pin<&mut Self>,
         mut cmp_fn: CmpFn,
-    ) -> Slot<'_, Ref, Frt>
+    ) -> Slot<'_, Lrt>
     where
-        CmpFn: FnMut(Pin<&Ref::Target>) -> core::cmp::Ordering,
+        CmpFn: FnMut(Pin<&Lrt::Target>) -> core::cmp::Ordering,
     {
         let mut anchor: *mut kernel::bindings::rb_node;
         let mut slot: &mut *mut kernel::bindings::rb_node;
@@ -352,11 +295,9 @@ where
             let ent_node = unsafe { Node::from_rb(ent_rb) };
             // SAFETY: All nodes in a tree always refer to a valid node
             //     within a reference target.
-            let ent_deref = unsafe { Frt::from_node(ent_node) };
-            // SAFETY: Entries in a tree a unconditionally pinned.
-            let ent_deref_r = unsafe { Pin::new_unchecked(ent_deref.as_ref()) };
+            let ent_target = unsafe { Lrt::borrow(ent_node) };
 
-            slot = match cmp_fn(ent_deref_r) {
+            slot = match cmp_fn(ent_target) {
                 core::cmp::Ordering::Less => {
                     // SAFETY: `ent_rb` points to a valid node and no other
                     //     references to it exist.
@@ -391,7 +332,7 @@ where
         mut clear_fn: ClearFn,
     )
     where
-        ClearFn: FnMut(Pin<Ref>),
+        ClearFn: FnMut(Pin<Lrt::Ref>),
     {
         let mut anchor: *mut kernel::bindings::rb_node;
 
@@ -421,31 +362,28 @@ where
             // SAFETY: `end_node` is a valid node.
             unsafe { (*Node::owner(ent_node)).store(0, atomic::Release) };
             // SAFETY: `end_node` is a valid node in a reference target.
-            let ent_deref = unsafe { Frt::from_node(ent_node) };
-            // SAFETY: All reference target pointers were acquired via
-            //     `pin_into_deref()`. Since we remove the entry from the tree,
-            //     we guarantee it will no longer be used.
-            let ent = unsafe { util::convert::FromDeref::pin_from_deref(ent_deref) };
-
+            let ent = unsafe { Lrt::release(ent_node) };
             clear_fn(ent);
         }
     }
 }
 
 // Convenience helpers
-impl<Ref, Frt> Tree<Ref, Frt>
+impl<Lrt> Tree<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Create a mutable cursor to an explicit element.
     ///
     /// Works like [`Tree::try_cursor_mut()`] but panics if the element is not
     /// linked into this tree.
-    pub fn claim_mut(
-        self: Pin<&mut Self>,
-        ent_target: Pin<&Ref::Target>,
-    ) -> CursorMut<'_, Ref, Frt> {
+    pub fn claim_mut<'tree, 'ent>(
+        self: Pin<&'tree mut Self>,
+        ent_target: Pin<&'ent Lrt::Target>,
+    ) -> CursorMut<'tree, Lrt>
+    where
+        'ent: 'tree,
+    {
         self.try_claim_mut(ent_target).unwrap_or_else(
             || Self::panic_claim(ent_target),
         )
@@ -473,15 +411,14 @@ where
     /// argument compared to the second.
     pub fn try_link_by<CmpFn>(
         self: Pin<&mut Self>,
-        ent: Pin<Ref>,
+        ent: Pin<Lrt::Ref>,
         mut cmp_fn: CmpFn,
-    ) -> Result<Pin<&'_ Ref::Target>, Pin<Ref>>
+    ) -> Result<Pin<&'_ Lrt::Target>, Pin<Lrt::Ref>>
     where
-        CmpFn: FnMut(Pin<&Ref::Target>, Pin<&Ref::Target>) -> core::cmp::Ordering,
+        CmpFn: FnMut(&Pin<Lrt::Ref>, Pin<&Lrt::Target>) -> core::cmp::Ordering,
     {
-        let ent_deref = ent.as_ref();
         self.find_slot_by(
-            |other| cmp_fn(ent_deref, other),
+            |other| cmp_fn(&ent, other),
         ).try_link(ent)
     }
 
@@ -497,27 +434,26 @@ where
 // SAFETY: Trees have no interior mutability, nor do they otherwise care for
 //     their calling CPU. They can be freely sent across CPUs, only limited by
 //     the stored type.
-unsafe impl<Ref, Frt> Send for Tree<Ref, Frt>
+unsafe impl<Lrt> Send for Tree<Lrt>
 where
-    Ref: Send + util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
+    Lrt::Ref: Send,
 {
 }
 
 // SAFETY: Trees have no interior mutability, nor do they otherwise care for
 //     their calling CPU. They can be shared across CPUs, only limited by
 //     the stored type.
-unsafe impl<Ref, Frt> Sync for Tree<Ref, Frt>
+unsafe impl<Lrt> Sync for Tree<Lrt>
 where
-    Ref: Sync + util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
+    Lrt::Ref: Sync,
 {
 }
 
-impl<Ref, Frt> core::default::Default for Tree<Ref, Frt>
+impl<Lrt> core::default::Default for Tree<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Return a new empty tree.
     ///
@@ -528,10 +464,9 @@ where
     }
 }
 
-impl<Ref, Frt> core::ops::Drop for Tree<Ref, Frt>
+impl<Lrt> core::ops::Drop for Tree<Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Clear a tree before dropping it.
     ///
@@ -689,10 +624,9 @@ impl core::ops::Drop for Node {
     }
 }
 
-impl<'tree, Ref, Frt> CursorMut<'tree, Ref, Frt>
+impl<'tree, Lrt> CursorMut<'tree, Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Unlink a specific node from the tree.
     ///
@@ -700,13 +634,9 @@ where
     ///
     /// `ent_node` must point to a valid entry in `tree`.
     unsafe fn unlink_at(
-        mut tree: Pin<&mut Tree<Ref, Frt>>,
+        mut tree: Pin<&mut Tree<Lrt>>,
         ent_node: NonNull<Node>,
-    ) -> Pin<Ref> {
-        // SAFETY: `ent_node` is a valid tree entry, as guaranteed by the
-        //     caller. It thus is embedded in a reference target type.
-        let ent_deref = unsafe { Frt::from_node(ent_node) };
-
+    ) -> Pin<Lrt::Ref> {
         // SAFETY: `rb_erase` only reshuffles a tree. So it is enough to
         //     ensure it is passed a valid root with only valid nodes. This
         //     invariant is always maintained by `Tree`.
@@ -717,14 +647,14 @@ where
             )
         };
 
-        // SAFETY: `ent_node` refers to a valid node.
+        // SAFETY: `ent_node` refers to a valid entry.
         unsafe {
             (*Node::owner(ent_node)).store(0, atomic::Release);
         }
 
-        // SAFETY: `ent_deref` was removed from the tree, as such it is
+        // SAFETY: `ent_node` was removed from the tree, as such it is
         //     guaranteed to not be used any further.
-        unsafe { util::convert::FromDeref::pin_from_deref(ent_deref) }
+        unsafe { Lrt::release(ent_node) }
     }
 
     /// Move to the next entry, if any.
@@ -784,7 +714,7 @@ where
     /// If the tree is empty, this is a no-op and returns `None`. Otherwise,
     /// the entry at the cursor is unlinked and is returned together with the
     /// result of [`Self::move_next()`].
-    pub fn move_next_try_unlink(&mut self) -> Option<(bool, Pin<Ref>)> {
+    pub fn move_next_try_unlink(&mut self) -> Option<(bool, Pin<Lrt::Ref>)> {
         let CursorPos::At(ent_node) = self.pos else {
             return None;
         };
@@ -803,7 +733,7 @@ where
     /// If the tree is empty, this is a no-op and returns `None`. Otherwise,
     /// the entry at the cursor is unlinked and is returned together with the
     /// result of [`Self::move_prev()`].
-    pub fn move_prev_try_unlink(&mut self) -> Option<(bool, Pin<Ref>)> {
+    pub fn move_prev_try_unlink(&mut self) -> Option<(bool, Pin<Lrt::Ref>)> {
         let CursorPos::At(ent_node) = self.pos else {
             return None;
         };
@@ -825,7 +755,7 @@ where
     ///
     /// This consumes the cursor. Use [`move_next_try_unlink()`] etc. to unlink
     /// entries while retaining the cursor.
-    pub fn try_unlink(mut self) -> Option<Pin<Ref>> {
+    pub fn try_unlink(mut self) -> Option<Pin<Lrt::Ref>> {
         let CursorPos::At(ent_node) = self.pos else {
             return None;
         };
@@ -836,21 +766,17 @@ where
 }
 
 // Convenience helpers
-impl<'tree, Ref, Frt> CursorMut<'tree, Ref, Frt>
+impl<'tree, Lrt> CursorMut<'tree, Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Move to the next entry, unlinking the current entry first.
     ///
     /// Works like [`Self::move_next_try_unlink()`] but panics if the tree is
     /// empty.
-    pub fn move_next_unlink(&mut self) -> (bool, Pin<Ref>) {
+    pub fn move_next_unlink(&mut self) -> (bool, Pin<Lrt::Ref>) {
         self.move_next_try_unlink().unwrap_or_else(
-            || core::panic!(
-                "attempting to unlink from an empty tree: {:?}",
-                core::ptr::from_ref(&*self.tree),
-            ),
+            || core::panic!("attempting to unlink from an empty tree"),
         )
     }
 
@@ -858,33 +784,25 @@ where
     ///
     /// Works like [`Self::move_prev_try_unlink()`] but panics if the tree is
     /// empty.
-    pub fn move_prev_unlink(&mut self) -> (bool, Pin<Ref>) {
+    pub fn move_prev_unlink(&mut self) -> (bool, Pin<Lrt::Ref>) {
         self.move_prev_try_unlink().unwrap_or_else(
-            || core::panic!(
-                "attempting to unlink from an empty tree: {:?}",
-                core::ptr::from_ref(&*self.tree),
-            ),
+            || core::panic!("attempting to unlink from an empty tree"),
         )
     }
 
     /// Unlink the current entry from the tree, consuming the cursor.
     ///
     /// Works like [`Self::try_unlink()`] but panics if the tree is empty.
-    pub fn unlink(self) -> Pin<Ref> {
-        let ptr = core::ptr::from_ref(&*self.tree);
+    pub fn unlink(self) -> Pin<Lrt::Ref> {
         self.try_unlink().unwrap_or_else(
-            || core::panic!(
-                "attempting to unlink from an empty tree: {:?}",
-                ptr,
-            ),
+            || core::panic!("attempting to unlink from an empty tree"),
         )
     }
 }
 
-impl<'tree, Ref, Frt> Slot<'tree, Ref, Frt>
+impl<'tree, Lrt> Slot<'tree, Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Check whether the slot is available for insertion.
     ///
@@ -906,7 +824,7 @@ where
         }
     }
 
-    fn entry_ptr(&self) -> Option<NonNull<Ref::Target>> {
+    fn entry_ptr(&self) -> Option<NonNull<Node>> {
         let slot = NonNull::new(self.slot)?;
 
         // SAFETY: `self.slot` is a valid tree entry.
@@ -914,21 +832,18 @@ where
 
         // SAFETY: `ent_rb` refers to a valid rb-entry in the tree, and is thus
         //     embedded in a valid node.
-        let ent_node = unsafe { Node::from_rb(ent_rb) };
-        // SAFETY: `ent_node` refers to a valid node in the tree, and thus must
-        //     be embedded in a reference target.
-        Some(unsafe { Frt::from_node(ent_node) })
+        Some(unsafe { Node::from_rb(ent_rb) })
     }
 
     /// Get a reference to the entry in this slot.
     ///
     /// If the slot is occupied, this will return a reference to the entry in
     /// this slot. Otherwise, this will return `None`.
-    pub fn entry(&self) -> Option<Pin<&Ref::Target>> {
+    pub fn entry(&self) -> Option<Pin<&Lrt::Target>> {
         match self.entry_ptr() {
             None => None,
-            // SAFETY: All entries in a tree are always pinned.
-            Some(v) => Some(unsafe { Pin::new_unchecked(v.as_ref()) }),
+            // SAFETY: `entry_ptr()` only returns valid entryies.
+            Some(v) => Some(unsafe { Lrt::borrow(v) }),
         }
     }
 
@@ -939,14 +854,14 @@ where
     ///
     /// This is only available if the reference type implements
     /// [`core::clone::Clone`].
-    pub fn entry_clone(&self) -> Option<Pin<Ref>>
+    pub fn entry_clone(&self) -> Option<Pin<Lrt::Ref>>
     where
-        Pin<Ref>: Clone,
+        Lrt::Ref: Clone,
     {
         self.entry_ptr().map(|v| {
-            // SAFETY: `v` is a valid tree entry, and as such was acquired via
-            //     `pin_into_deref()`.
-            unsafe { Tree::<Ref, Frt>::clone_entry(v) }
+            // SAFETY: `v` is a valid tree entry, and as such is from
+            //     `acquire()`.
+            unsafe { Lrt::borrow_clone(v) }
         })
     }
 
@@ -966,22 +881,17 @@ where
     /// slot, is to allow re-use of the slot in case the link failed.
     pub fn try_link(
         &mut self,
-        ent: Pin<Ref>,
-    ) -> Result<Pin<&'tree Ref::Target>, Pin<Ref>> {
+        ent: Pin<Lrt::Ref>,
+    ) -> Result<Pin<&'tree Lrt::Target>, Pin<Lrt::Ref>> {
         // If the entry was already occupied, or already used for insertion, it
         // is no longer available. Refuse to attempt the link.
         if !self.available() {
             return Err(ent);
         }
 
-        // Acquire the entry. This turns the owned entry into its dereferenced
-        // form. To prevent leaking the value, we have to ensure to reverse
-        // this via `pin_from_deref()` on error, or when unlinking the entry
-        // from the tree.
-        let ent_deref = util::convert::IntoDeref::pin_into_deref(ent);
-        // SAFETY: `ping_into_deref()` guarantees that the yielded pointer is
-        //     convertible to a shared reference.
-        let ent_node = unsafe { Frt::to_node(ent_deref) };
+        // Acquire the entry and get access to the node. This can be converted
+        // to a reference as long as we do not release it.
+        let ent_node = Lrt::acquire(ent);
 
         let owner = self.tree.as_mut().as_owner();
         // SAFETY: `ent_node` is a valid node.
@@ -992,10 +902,8 @@ where
             // this tree or another tree). Refuse to use this entry, but return
             // it fully to the caller so it can be reused.
             //
-            // SAFETY: The pointer was just obtained from `pin_into_deref()`,
-            //     so the inverse operation is safe as long as we do not
-            //     continue using the pointer.
-            return Err(unsafe { util::convert::FromDeref::pin_from_deref(ent_deref) });
+            // SAFETY: The pointer was just obtained from `acquire()`.
+            return Err(unsafe { Lrt::release(ent_node) });
         };
 
         // The entry was successfully claimed. Let `rb_link_node()` and
@@ -1026,33 +934,27 @@ where
         self.anchor = core::ptr::null_mut();
         self.slot = core::ptr::null_mut();
 
-        // SAFETY: The pointer was just obtained from `pin_into_deref()` on a
-        //     valid value, as such it is a valid reference to the pinned
-        //     dereferenced value.
-        Ok(unsafe { Pin::new_unchecked(ent_deref.as_ref()) })
+        // SAFETY: The pointer was just obtained from `acquire()`.
+        Ok(unsafe { Lrt::borrow(ent_node) })
     }
 }
 
 // Convenience helpers
-impl<'tree, Ref, Frt> Slot<'tree, Ref, Frt>
+impl<'tree, Lrt> Slot<'tree, Lrt>
 where
-    Ref: util::intrusive::Reference,
-    Frt: util::intrusive::Field<Ref, Node = Node>,
+    Lrt: util::intrusive::Link<Node>,
 {
     /// Link a new entry into this slot.
     ///
     /// Works like [`Self::try_link()`] but panics if the entry cannot be
     /// linked.
-    pub fn link(mut self, ent: Pin<Ref>) -> Pin<&'tree Ref::Target> {
+    pub fn link(mut self, ent: Pin<Lrt::Ref>) -> Pin<&'tree Lrt::Target> {
         if !self.available() {
-            core::panic!(
-                "attempting to link on a used slot: {:?}",
-                core::ptr::from_ref(&*self.tree),
-            );
+            core::panic!("attempting to link on a used slot");
         }
         match self.try_link(ent) {
             Ok(v) => v,
-            Err(v) => Tree::<Ref, Frt>::panic_acquire(v),
+            Err(v) => Tree::<Lrt>::panic_acquire(v),
         }
     }
 }
@@ -1067,15 +969,15 @@ mod test {
         rb: Node,
     }
 
-    impl_pin_node!(Entry, rb);
+    util::field::impl_pin_field!(Entry, rb, Node);
 
     #[test]
     fn test_basic() {
         let e0 = core::pin::pin!(Entry { key: 0, ..Default::default() });
         let e1 = core::pin::pin!(Entry { key: 1, ..Default::default() });
 
-        let tree_o: Tree<&Entry, node_of!(Entry, rb)> = Tree::new();
-        let mut tree: Pin<&mut Tree<_, _>> = core::pin::pin!(tree_o);
+        let tree_o: Tree<node_of!(&Entry, rb)> = Tree::new();
+        let mut tree: Pin<&mut Tree<_>> = core::pin::pin!(tree_o);
 
         assert!(tree.as_mut().is_empty());
         tree.as_mut().find_slot_by(|other| e0.key.cmp(&other.key))
