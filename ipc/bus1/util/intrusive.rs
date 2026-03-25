@@ -287,6 +287,24 @@ pub unsafe trait Link<Node: ?Sized> {
     /// pointer.
     unsafe fn release(v: NonNull<Node>) -> Pin<Self::Ref>;
 
+    /// Project a reference target to its node.
+    ///
+    /// This allows access to a `Node` from its owning reference target,
+    /// without having access to any owning reference (`Self::Ref`).
+    ///
+    /// The returned pointer is guaranteed to be convertible to a shared
+    /// reference for any caller-chosen lifetime `'a` where `'_: 'a`.
+    ///
+    /// Repeated calls will return the same pointer, and are guaranteed to be
+    /// the inverse operation of [`Self::borrow()`].
+    // XXX: We need to investigate whether it is valid to store pointers from
+    // this in a collection itself. A collection must already own pointers to
+    // the same element, but likely not derived from a matching reference.
+    // Hence, under Stacked Borrows it will carry a different tag and thus can
+    // invalidate other tags if interior mutability is involved (needs to be
+    // verified).
+    fn project(v: &Self::Target) -> NonNull<Node>;
+
     /// Borrow the reference target temporarily.
     ///
     /// # Safety
@@ -393,6 +411,16 @@ where
         // SAFETY: Caller guarantees that `v` was from `acquire()`, and thus
         //     from `pin_into_deref()`. They also guarantee to cease using `v`.
         unsafe { util::convert::FromDeref::pin_from_deref(target) }
+    }
+
+    fn project(v: &Self::Target) -> NonNull<Frt::Type> {
+        // SAFETY: `v` is a valid reference, so it must point to a valid
+        //     allocation.
+        unsafe {
+            NonNull::new_unchecked(
+                field::field_of_ptr::<Frt>(core::ptr::from_ref(v).cast_mut())
+            )
+        }
     }
 
     unsafe fn borrow<'a>(v: NonNull<Frt::Type>) -> Pin<&'a Self::Target>
