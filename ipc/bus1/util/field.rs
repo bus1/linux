@@ -7,6 +7,7 @@
 //! generalized versions of this, see
 //! [field projections](https://github.com/rust-lang/rust/issues/145383).
 
+use core::ptr::NonNull;
 use kernel::prelude::*;
 
 /// Authoritative information about a field of another type.
@@ -127,6 +128,20 @@ pub unsafe fn field_of_ptr<Frt: Field>(v: *mut Frt::Base) -> *mut Frt::Type {
     unsafe { v.byte_offset(Frt::OFFSET as isize).cast() }
 }
 
+/// Turn a base pointer into a member field pointer.
+///
+/// Works like [`field_of_ptr()`] but on [`NonNull`].
+///
+/// ## Safety
+///
+/// The pointer `v` must point to an allocation of `BaseTy`, but that value can
+/// be uninitialized.
+pub unsafe fn field_of_nn<Frt: Field>(v: NonNull<Frt::Base>) -> NonNull<Frt::Type> {
+    // SAFETY: Validity of the allocation behind `v` is delegated to the
+    //     caller. The offset calculation is guaranteed by the `Field` trait.
+    unsafe { v.byte_offset(Frt::OFFSET as isize).cast() }
+}
+
 /// Turn a field pointer into a base pointer.
 ///
 /// This is the inverse of [`field_of_ptr()`]. It recreates the base pointer
@@ -148,6 +163,20 @@ pub unsafe fn field_of_ptr<Frt: Field>(v: *mut Frt::Base) -> *mut Frt::Type {
 /// The pointer `v` must point into an allocation of `BaseTy` at the offset of
 /// the member field described by `Field`, but the value can be uninitialized.
 pub unsafe fn base_of_ptr<Frt: Field>(v: *mut Frt::Type) -> *mut Frt::Base {
+    // SAFETY: Validity of the allocation behind `v` is delegated to the
+    //     caller. The offset calculation is guaranteed by the `Field` trait.
+    unsafe { v.byte_offset(-(Frt::OFFSET as isize)).cast() }
+}
+
+/// Turn a field pointer into a base pointer.
+///
+/// Works like [`base_of_ptr()`] but on [`NonNull`].
+///
+/// ## Safety
+///
+/// The pointer `v` must point into an allocation of `BaseTy` at the offset of
+/// the member field described by `Field`, but the value can be uninitialized.
+pub unsafe fn base_of_nn<Frt: Field>(v: NonNull<Frt::Type>) -> NonNull<Frt::Base> {
     // SAFETY: Validity of the allocation behind `v` is delegated to the
     //     caller. The offset calculation is guaranteed by the `Field` trait.
     unsafe { v.byte_offset(-(Frt::OFFSET as isize)).cast() }
