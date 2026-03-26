@@ -733,6 +733,73 @@ where
         }
         self.truncate(num_kept);
     }
+
+    fn shrink_to_fit(&mut self) -> Result<(), AllocError>  {
+        if Self::is_zst() {
+            // ZSTs always use maximum capacity.
+            return Ok(());
+        }
+
+        let layout = ArrayLayout::new(self.len()).map_err(|_| AllocError)?;
+
+        // SAFETY:
+        // - `ptr` is valid because it's either `None` or comes from a previous
+        //   call to `A::realloc`.
+        // - `self.layout` matches the `ArrayLayout` of the preceding
+        //   allocation.
+        let ptr = unsafe {
+            A::realloc(
+                Some(self.ptr.cast()),
+                layout.into(),
+                self.layout.into(),
+                crate::alloc::flags::GFP_NOWAIT,
+                NumaNode::NO_NODE,
+            )?
+        };
+
+        // INVARIANT:
+        // - `layout` is some `ArrayLayout::<T>`,
+        // - `ptr` has been created by `A::realloc` from `layout`.
+        self.ptr = ptr.cast();
+        self.layout = layout;
+        Ok(())
+    }
+
+    /// Converts the vector into [`Box<[T], A>`].
+    ///
+    /// Excess capacity is retained in the allocation, but lost until the box
+    /// is dropped.
+    ///
+    /// This function is fallible, because kernel allocators do not guarantee
+    /// that shrinking reallocations are infallible, yet the Rust abstractions
+    /// strictly require that layouts are correct. Hence, the caller must be
+    /// ready to deal with reallocation failures.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = KVec::<u16>::with_capacity(4, GFP_KERNEL)?;
+    /// for i in 0..4 {
+    ///     v.push(i, GFP_KERNEL);
+    /// }
+    /// let s: KBox<[u16]> = v.into_boxed_slice()?;
+    /// assert_eq!(s.len(), 4);
+    /// # Ok::<(), kernel::alloc::AllocError>(())
+    /// ```
+    pub fn into_boxed_slice(mut self) -> Result<Box<[T], A>, AllocError> {
+        self.shrink_to_fit()?;
+        let (buf, len, _cap) = self.into_raw_parts();
+        let slice = ptr::slice_from_raw_parts_mut(buf, len);
+
+        // SAFETY:
+        // - `slice` has been allocated with `A`
+        // - `slice` is suitably aligned
+        // - `slice` has an exact length of `len`
+        // - all elements within `slice` are initialized values of `T`
+        // - `len` does not exceed `isize::MAX`
+        // - `slice` was allocated for `Layout::for_value::<[T]>()`
+        Ok(unsafe { Box::from_raw(slice) })
+    }
 }
 
 impl<T: Clone, A: Allocator> Vec<T, A> {
