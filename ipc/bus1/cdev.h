@@ -16,9 +16,20 @@
  * operations in a direct mapping.
  */
 
+#include <linux/cleanup.h>
+#include <linux/err.h>
+
+struct b1_acct;
 struct b1_cdev;
 
-struct b1_cdev *b1_cdev_new(void);
+struct b1_cdev *b1_cdev_new(struct b1_acct *acct);
 struct b1_cdev *b1_cdev_free(struct b1_cdev *cdev);
+
+DEFINE_FREE(
+	b1_cdev_free,
+	struct b1_cdev *,
+	if (!IS_ERR_OR_NULL(_T))
+		b1_cdev_free(_T);
+)
 
 #endif /* __B1_CDEV_H */
