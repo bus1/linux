@@ -22,6 +22,7 @@ $(obj)/lib.o: $(obj)/capi.rs
 $(obj)/lib.o: export BUS1_CAPI_PATH=$(abspath $(obj)/capi.rs)
 
 bus1-y :=		\
+	cdev.o			\
 	lib.o			\
 	main.o
 
