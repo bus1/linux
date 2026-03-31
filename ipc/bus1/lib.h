@@ -13,7 +13,6 @@
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/types.h>
-#include <linux/wait.h>
 #include <uapi/linux/bus1.h>
 
 typedef __u32 b1_acct_id_t;
@@ -34,6 +33,7 @@ struct b1_peer_peek_handle_release;
 struct b1_peer_peek_node_release;
 union  b1_peer_peek_union;
 struct b1_peer_peek_user;
+struct wait_queue_head;
 
 /* accounting */
 
@@ -113,7 +113,7 @@ struct b1_peer_peek {
 	};
 };
 
-struct b1_peer *b1_peer_new(struct b1_acct_actor *actor, wait_queue_head_t *waitq);
+struct b1_peer *b1_peer_new(struct b1_acct_actor *actor, struct wait_queue_head *waitq);
 struct b1_peer *b1_peer_ref(struct b1_peer *peer);
 struct b1_peer *b1_peer_unref(struct b1_peer *peer);
 
