@@ -4,6 +4,7 @@
 //! This is the in-kernel implementation of the Bus1 communication system in
 //! rust. Any user-space API is outside the scope of this module.
 
+pub mod acct;
 pub mod util;
 
 #[allow(
