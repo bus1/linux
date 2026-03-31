@@ -5,6 +5,7 @@
 //! rust. Any user-space API is outside the scope of this module.
 
 pub mod acct;
+pub mod bus;
 pub mod util;
 
 #[allow(
