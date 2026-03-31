@@ -1461,7 +1461,11 @@ unsafe extern "C" fn op_send_message(
         };
     }
 
-    match this_b.send_message(to_b, xfers_vec.into_boxed_slice(), shared_b.into()) {
+    let Ok(xfers_box) = xfers_vec.into_boxed_slice() else {
+        return ENOMEM.to_errno();
+    };
+
+    match this_b.send_message(to_b, xfers_box, shared_b.into()) {
         Ok(()) => 0,
         Err(MessageError::Alloc(AllocError)) => ENOMEM.to_errno(),
         Err(MessageError::HandleForeign) => ENOTRECOVERABLE.to_errno(),
