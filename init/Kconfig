@@ -502,6 +502,18 @@ config POSIX_MQUEUE_SYSCTL
 	depends on SYSCTL
 	default y
 
+config BUS1
+	tristate "Bus1 Capability-based IPC"
+	depends on RUST
+	help
+	  The Bus1 linux subsystem provides capability-based inter-process
+	  communication. It allows services and operating system tasks to
+	  exchange messages, send notifications, and transfer data and
+	  resources, using an object-capability system for implicit access
+	  control. It is highly scalable, yet guarantees causal ordering across
+	  all its operations, including the builtin object lifetime
+	  notifications.
+
 config WATCH_QUEUE
 	bool "General notification queue"
 	default n
