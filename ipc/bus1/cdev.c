@@ -790,7 +790,7 @@ b1_cdev_send_import(
 	if (!copy_from_iter_full(data, n, &iov_iter))
 		return ERR_PTR(-EFAULT);
 
-	umessage->shared = b1_message_shared_new(no_free_ptr(data));
+	umessage->shared = b1_message_shared_new(n, no_free_ptr(data));
 	if (IS_ERR(umessage->shared)) {
 		r = PTR_ERR(umessage->shared);
 		umessage->shared = NULL;

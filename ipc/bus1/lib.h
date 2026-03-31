@@ -170,7 +170,8 @@ DEFINE_FREE(
 
 /* message_shared */
 
-struct b1_message_shared *b1_message_shared_new(void *kvdata);
+struct b1_message_shared *b1_message_shared_new(u64 n_data, void *data);
+struct b1_message_shared *b1_message_shared_ref(struct b1_message_shared *shared);
 struct b1_message_shared *b1_message_shared_unref(struct b1_message_shared *shared);
 
 /* op */
