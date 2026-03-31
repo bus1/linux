@@ -110,7 +110,7 @@ struct b1_peer_peek {
 		struct b1_peer_peek_handle_release {
 			struct b1_node *node;
 		} handle_release;
-	};
+	} u;
 };
 
 struct b1_peer *b1_peer_new(struct b1_acct_actor *actor, struct wait_queue_head *waitq);

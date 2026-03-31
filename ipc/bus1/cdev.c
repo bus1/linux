@@ -1158,21 +1158,21 @@ b1_cdev_recv_peek(
 	case BUS1_MESSAGE_TYPE_USER:
 		return b1_cdev_recv_user(
 			upeer,
-			&peek.user,
+			&peek.u.user,
 			metadata,
 			message
 		);
 	case BUS1_MESSAGE_TYPE_NODE_RELEASE:
 		return b1_cdev_recv_node_release(
 			upeer,
-			peek.node_release.handle,
+			peek.u.node_release.handle,
 			metadata,
 			message
 		);
 	case BUS1_MESSAGE_TYPE_HANDLE_RELEASE:
 		return b1_cdev_recv_handle_release(
 			upeer,
-			peek.handle_release.node,
+			peek.u.handle_release.node,
 			metadata,
 			message
 		);
