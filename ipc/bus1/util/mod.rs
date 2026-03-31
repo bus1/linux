@@ -5,7 +5,7 @@
 //! module.
 
 use kernel::prelude::*;
-use kernel::sync::Arc;
+use kernel::sync::{Arc, ArcBorrow};
 
 pub mod convert;
 pub mod field;
@@ -38,6 +38,15 @@ pub fn arc_pin<T>(v: Arc<T>) -> Pin<Arc<T>> {
 pub fn arc_unpin<T>(v: Pin<Arc<T>>) -> Arc<T> {
     // SAFETY: `Arc<T>` guarantees its target is pinned, even if not wrapped.
     unsafe { Pin::into_inner_unchecked(v) }
+}
+
+/// Convert an ArcBorrow to its pinned version.
+///
+/// All [`Arc`] instances are unconditionally pinned. It is always safe to
+/// convert from their unpinned variant to their pinned variant.
+pub fn arc_borrow_pin<T>(v: ArcBorrow<'_, T>) -> Pin<ArcBorrow<'_, T>> {
+    // SAFETY: `Arc<T>` guarantees its target is pinned.
+    unsafe { Pin::new_unchecked(v) }
 }
 
 /// Create a [`NonNull`] from a reference.
