@@ -646,6 +646,21 @@ impl Actor {
         unsafe { Arc::from_raw(this.cast::<Self>()) }
     }
 
+    /// Borrow a raw reference.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must guarantee this pointer was acquired via
+    /// `Self::into_raw()`, and they must refrain from releasing it via
+    /// `Self::from_raw()` for `'a`.
+    pub(crate) unsafe fn borrow_raw<'a>(
+        this: *mut capi::b1_acct_actor,
+    ) -> ArcBorrow<'a, Self> {
+        // SAFETY: Caller guarantees `this` is from `Self::into_raw()` and
+        // will not be released for `'a`.
+        unsafe { ArcBorrow::from_raw(this.cast::<Self>()) }
+    }
+
     // Return the memory address of the actor as integer.
     //
     // The same value can be obtained via `(&raw const *actor).addr()`. Note
