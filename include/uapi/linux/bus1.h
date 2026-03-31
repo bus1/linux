@@ -25,7 +25,7 @@ struct bus1_metadata {
 	__u64 account;
 } __attribute__((__aligned__(8)));
 
-enum bus1_message_type: u64 {
+enum bus1_message_type: __u64 {
 	BUS1_MESSAGE_TYPE_USER			= 0,
 	BUS1_MESSAGE_TYPE_NODE_RELEASE		= 1,
 	BUS1_MESSAGE_TYPE_HANDLE_RELEASE	= 2,
