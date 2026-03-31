@@ -1024,9 +1024,9 @@ b1_cdev_recv_user(
 	lockdep_assert_held(&upeer->lock);
 
 	unode = b1_node_get_userdata(peek->node);
-	if (WARN_ON(!unode)) {
+	if (!unode) {
 		b1_peer_pop(upeer->peer);
-		return -ENOTRECOVERABLE;
+		return 0;
 	}
 
 	r = b1_cdev_recv_export_transfers(upeer, peek, message);
@@ -1062,7 +1062,7 @@ b1_cdev_recv_user(
 		.ptr_data_vecs = message->ptr_data_vecs,
 	};
 
-	return -EAGAIN;
+	return 1;
 }
 
 static int
@@ -1077,9 +1077,9 @@ b1_cdev_recv_node_release(
 	lockdep_assert_held(&upeer->lock);
 
 	uhandle = b1_handle_get_userdata(handle);
-	if (WARN_ON(!uhandle)) {
+	if (!uhandle) {
 		b1_peer_pop(upeer->peer);
-		return -ENOTRECOVERABLE;
+		return 0;
 	}
 
 	*metadata = (struct bus1_metadata){
@@ -1100,7 +1100,7 @@ b1_cdev_recv_node_release(
 	b1_handle_end(uhandle->handle);
 	b1_upeer_unlink(upeer, uhandle);
 	b1_uobject_free(uhandle);
-	return 0;
+	return 1;
 }
 
 static int
@@ -1115,9 +1115,9 @@ b1_cdev_recv_handle_release(
 	lockdep_assert_held(&upeer->lock);
 
 	unode = b1_node_get_userdata(node);
-	if (WARN_ON(!unode)) {
+	if (!unode) {
 		b1_peer_pop(upeer->peer);
-		return -ENOTRECOVERABLE;
+		return 0;
 	}
 
 	*metadata = (struct bus1_metadata){
@@ -1138,7 +1138,7 @@ b1_cdev_recv_handle_release(
 	b1_node_end(unode->node);
 	b1_upeer_unlink(upeer, unode);
 	b1_uobject_free(unode);
-	return 0;
+	return 1;
 }
 
 static int
@@ -1216,8 +1216,10 @@ b1_cdev_ioctl_recv(struct b1_upeer *upeer, unsigned long arg)
 	memset(&metadata, 0, sizeof(metadata));
 
 	mutex_lock(&upeer->lock);
-	r = b1_cdev_recv_peek(upeer, &metadata, &message);
-	if (r >= 0) {
+	do {
+		r = b1_cdev_recv_peek(upeer, &metadata, &message);
+	} while (!r);
+	if (r > 0) {
 		if (copy_to_user(u_metadata, &metadata, sizeof(metadata)) ||
 		    copy_to_user(u_message, &message, sizeof(message)))
 			r = -EFAULT;
