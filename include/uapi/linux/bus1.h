@@ -25,10 +25,12 @@ struct bus1_metadata {
 	__u64 account;
 } __attribute__((__aligned__(8)));
 
-#define BUS1_MESSAGE_TYPE_USER			((__u64)0)
-#define BUS1_MESSAGE_TYPE_NODE_RELEASE		((__u64)1)
-#define BUS1_MESSAGE_TYPE_HANDLE_RELEASE	((__u64)2)
-#define _BUS1_MESSAGE_TYPE_N			((__u64)3)
+enum bus1_message_type: u64 {
+	BUS1_MESSAGE_TYPE_USER			= 0,
+	BUS1_MESSAGE_TYPE_NODE_RELEASE		= 1,
+	BUS1_MESSAGE_TYPE_HANDLE_RELEASE	= 2,
+	_BUS1_MESSAGE_TYPE_N,
+};
 
 struct bus1_message {
 	__u64 flags;
