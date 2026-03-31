@@ -14,6 +14,7 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/wait.h>
+#include <uapi/linux/bus1.h>
 
 typedef __u32 b1_acct_id_t;
 typedef __u64 b1_acct_value_t;

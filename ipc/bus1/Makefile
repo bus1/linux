@@ -3,7 +3,7 @@
 quiet_cmd_bindgen = BINDGEN $@
       cmd_bindgen = \
 	$(BINDGEN) $< -o $@ \
-		--allowlist-file $< \
+		$(addprefix --allowlist-file=,$^) \
 		--ctypes-prefix kernel::ffi \
 		--no-debug '.*' \
 		--no-layout-tests \
@@ -15,7 +15,7 @@ quiet_cmd_bindgen = BINDGEN $@
 		-DMODULE \
 		-fno-builtin
 
-$(obj)/capi.rs: $(src)/lib.h
+$(obj)/capi.rs: $(src)/lib.h $(srctree)/include/uapi/linux/bus1.h
 	$(call cmd,bindgen)
 
 $(obj)/lib.o: $(obj)/capi.rs
