@@ -51,8 +51,9 @@ where
     Lrt: util::intrusive::Link<Node>,
 {
     // Pointer to the first node in the list. Set to `END` if the list is
-    // empty. All other pointers always represent a pinned owned reference to
-    // an entry, gained via `Ref::pin_into_deref()`.
+    // empty, `NULL` if it was sealed and can no longer be pused to. All other
+    // pointers always represent a pinned owned reference to an entry, gained
+    // via `Ref::pin_into_deref()`.
     first: atomic::Atomic<usize>,
     // Different lists can store entries of type `Ref` via different nodes. By
     // pinning the field-representing-type, it is always clear which node a
@@ -79,6 +80,11 @@ macro_rules! util_lll_node_of {
 #[doc(inline)]
 pub use util_lll_node_of as node_of;
 
+// Marks a sealed list. This is different than `slist::END` in that no more
+// entries can be pushed to a sealed list. Otherwise, it is treated like an
+// empty list.
+pub(crate) const SEAL: usize = 0;
+
 impl<Lrt> List<Lrt>
 where
     Lrt: util::intrusive::Link<Node>,
@@ -102,7 +108,18 @@ where
     /// Note that the list does not maintain a counter of how many elements are
     /// linked.
     pub fn is_empty(&self) -> bool {
-        self.first.load(atomic::Relaxed) == util::slist::END
+        match self.first.load(atomic::Relaxed) {
+            SEAL | util::slist::END => true,
+            _ => false,
+        }
+    }
+
+    /// Check whether the list is sealed.
+    ///
+    /// This returns `true` if the list is sealed. A sealed list is always
+    /// empty and cannot be modified, anymore (nor can the seal be removed).
+    pub fn is_sealed(&self) -> bool {
+        self.first.load(atomic::Relaxed) == SEAL
     }
 
     /// Link a node at the front of a list.
@@ -120,13 +137,16 @@ where
         &self,
         ent: Pin<Lrt::Ref>,
     ) -> Result<(), Pin<Lrt::Ref>> {
-        let ent_node = Lrt::acquire(ent);
+        let mut first = self.first.load(atomic::Relaxed);
+        if first == SEAL {
+            // Sealed lists cannot be linked to.
+            return Err(ent);
+        }
 
+        let ent_node = Lrt::acquire(ent);
         // SAFETY: `ent_node` is convertible to a shared reference as long as
         //     we do not call `Lrt::release()`.
         let ent_node_r = unsafe { ent_node.as_ref() };
-
-        let mut first = self.first.load(atomic::Relaxed);
 
         let Ok(_) = ent_node_r.next.cmpxchg(0, first, atomic::Relaxed) else {
             // `ent_node_r` becomes invalid once `end_deref` is released.
@@ -153,15 +173,19 @@ where
                 ent_node_addr,
                 atomic::Release,
             ) {
-                Ok(_) => break,
+                Ok(_) => break Ok(()),
                 Err(v) => {
+                    // If the list is sealed, no more entries can be linked.
+                    if v == SEAL {
+                        // SAFETY: `ent_node` was just acquired from
+                        // `pin_into_deref()` and is no longer used afterwards.
+                        break Err(unsafe { Lrt::release(ent_node) });
+                    }
                     first = v;
                     ent_node_r.next.store(first, atomic::Relaxed);
                 },
             }
         }
-
-        Ok(())
     }
 
     /// Clear the entire list and return the entries to the caller.
@@ -175,15 +199,48 @@ where
     /// This ensures an acquire memory barrier matching the release memory
     /// barrier in [`List::try_link_front()`].
     pub fn clear(&self) -> util::slist::List<Lrt> {
-        // SAFETY: By clearing `self.first` we acquire the list. Since it uses
-        //     the same nodes as `slist`, we can create one from it.
-        unsafe {
-            util::slist::List::with(
-                // Use acquire barrier to ensure writes to the nodes are
-                // visible, if done before they were linked. The matching
-                // release barrier is in `Self::try_link_front()`.
-                self.first.xchg(util::slist::END, atomic::Acquire),
-            )
+        let mut first = self.first.load(atomic::Relaxed);
+        loop {
+            if first == SEAL {
+                break util::slist::List::new();
+            }
+            // Use acquire barrier to ensure writes to the nodes are
+            // visible, if done before they were linked. The matching
+            // release barrier is in `Self::try_link_front()`.
+            match self.first.cmpxchg(
+                first,
+                util::slist::END,
+                atomic::Acquire,
+            ) {
+                Ok(v) => {
+                    // SAFETY: By clearing `self.first` we acquire the list.
+                    // Since it uses the same nodes as `slist`, we can create
+                    // one from it.
+                    break unsafe { util::slist::List::with(v) };
+                },
+                Err(v) => first = v,
+            }
+        }
+    }
+
+    /// Seal the entire list and return all entries to the caller.
+    ///
+    /// This will atomically remove all entries from the list and seal it, so
+    /// any new attempt to link more entries will fail.
+    ///
+    /// A sealed list will remain sealed and cannot be unsealed. This also
+    /// implies that the list will remain empty.
+    ///
+    /// If the list is already sealed, this is a no-op and will return an empty
+    /// list.
+    pub fn seal(&self) -> util::slist::List<Lrt> {
+        let v = self.first.xchg(SEAL, atomic::Acquire);
+        if v == SEAL {
+            util::slist::List::new()
+        } else {
+            // SAFETY: By clearing `self.first` we acquire the list. Since it
+            // uses the same nodes as `slist`, we can create one from it.
+            unsafe { util::slist::List::with(v) }
         }
     }
 }
@@ -270,6 +327,7 @@ mod test {
         let list: List<node_of!(&Entry, node)> = List::new();
 
         assert!(list.is_empty());
+        assert!(!list.is_sealed());
         assert!(!e0.node.is_linked());
         assert!(!e1.node.is_linked());
 
@@ -277,6 +335,7 @@ mod test {
         list.link_front(e1.as_ref());
 
         assert!(!list.is_empty());
+        assert!(!list.is_sealed());
         assert!(e0.node.is_linked());
         assert!(e1.node.is_linked());
 
@@ -289,6 +348,30 @@ mod test {
         assert!(r.unlink_front().is_none());
 
         assert!(list.is_empty());
+        assert!(!list.is_sealed());
+        assert!(!e0.node.is_linked());
+        assert!(!e1.node.is_linked());
+
+        list.link_front(e0.as_ref());
+        assert!(!list.is_empty());
+        assert!(!list.is_sealed());
+        assert!(e0.node.is_linked());
+        assert!(!e1.node.is_linked());
+
+        assert!(!list.is_sealed());
+        let mut r = list.seal();
+        assert!(list.is_empty());
+        assert!(list.is_sealed());
+        assert!(e0.node.is_linked());
+        assert!(!e1.node.is_linked());
+        assert!(list.try_link_front(e0.as_ref()).is_err());
+        assert!(list.try_link_front(e1.as_ref()).is_err());
+
+        assert_eq!(r.unlink_front().unwrap().key, 0);
+        assert!(r.unlink_front().is_none());
+
+        assert!(list.is_empty());
+        assert!(list.is_sealed());
         assert!(!e0.node.is_linked());
         assert!(!e1.node.is_linked());
     }
