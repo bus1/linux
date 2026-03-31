@@ -9,6 +9,7 @@ use kernel::sync::{Arc, ArcBorrow};
 
 pub mod convert;
 pub mod field;
+pub mod intrusive;
 
 /// Convert an Arc to its pinned version.
 ///
