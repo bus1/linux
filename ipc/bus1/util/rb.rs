@@ -110,6 +110,19 @@ enum CursorPos {
     Back(NonNull<Node>),
 }
 
+/// Immutable cursor over entries of an RB-Tree.
+///
+/// This cursor either points at an empty tree, directly at a node in a
+/// non-empty tree, before the first node, or after the last node. The cursor
+/// can be moved back and forth.
+pub struct Cursor<'tree, Lrt>
+where
+    Lrt: util::intrusive::Link<Node>,
+{
+    _tree: &'tree Tree<Lrt>,
+    pos: CursorPos,
+}
+
 /// Mutable cursor over entries of an RB-Tree.
 ///
 /// This cursor either points at an empty tree, directly at a node in a
@@ -236,6 +249,52 @@ where
             (*Node::owner(ent_node)).load(atomic::Relaxed)
         };
         v == self.as_owner()
+    }
+
+    /// Create an immutable cursor at the first element.
+    ///
+    /// The new cursor will point to the first element. If the tree is empty,
+    /// the cursor points to no element at all.
+    pub fn cursor_first(&self) -> Cursor<'_, Lrt> {
+        // SAFETY: `rb_first()` requires a pointer to a valid root, pointing to
+        // valid nodes. This invariant is maintained by `Tree`.
+        let pos = if let Some(v) = NonNull::new(unsafe {
+            kernel::bindings::rb_first(&self.root)
+        }) {
+            // SAFETY: `v` points to a valid entry in the tree, thus it is
+            // embedded in a `Node`.
+            CursorPos::At(unsafe { Node::from_rb(v) })
+        } else {
+            CursorPos::Empty
+        };
+
+        Cursor {
+            _tree: self,
+            pos,
+        }
+    }
+
+    /// Create an immutable cursor at the last element.
+    ///
+    /// The new cursor will point to the last element. If the tree is empty,
+    /// the cursor points to no element at all.
+    pub fn cursor_last(&self) -> Cursor<'_, Lrt> {
+        // SAFETY: `rb_last()` requires a pointer to a valid root, pointing to
+        // valid nodes. This invariant is maintained by `Tree`.
+        let pos = if let Some(v) = NonNull::new(unsafe {
+            kernel::bindings::rb_last(&self.root)
+        }) {
+            // SAFETY: `v` points to a valid entry in the tree, thus it is
+            // embedded in a `Node`.
+            CursorPos::At(unsafe { Node::from_rb(v) })
+        } else {
+            CursorPos::Empty
+        };
+
+        Cursor {
+            _tree: self,
+            pos,
+        }
     }
 
     /// Create a mutable cursor at the first element.
@@ -465,6 +524,25 @@ where
         self.find_slot_by(
             |other| cmp_fn(&ent, other),
         ).try_link(ent)
+    }
+
+    /// Try linking a new entry in this tree, after all duplicates.
+    ///
+    /// Works like [`Tree:try_link_by()`] but will link the entry even if there
+    /// are duplicates with the same key. The entry will be linked after all
+    /// duplicates.
+    pub fn try_link_last_by<CmpFn>(
+        self: Pin<&mut Self>,
+        ent: Pin<Lrt::Ref>,
+        mut cmp_fn: CmpFn,
+    ) -> Result<Pin<&'_ Lrt::Target>, Pin<Lrt::Ref>>
+    where
+        CmpFn: FnMut(&Pin<Lrt::Ref>, Pin<&Lrt::Target>) -> core::cmp::Ordering,
+    {
+        self.find_slot_by(|other| match cmp_fn(&ent, other) {
+            core::cmp::Ordering::Equal => core::cmp::Ordering::Greater,
+            v => v,
+        }).try_link(ent)
     }
 
     /// Try unlinking a specific element from the tree.
@@ -697,6 +775,96 @@ impl core::ops::Drop for Node {
     }
 }
 
+impl<'tree, Lrt> Cursor<'tree, Lrt>
+where
+    Lrt: util::intrusive::Link<Node>,
+{
+    /// Return the reference target of the current element.
+    ///
+    /// Returns `None` if the tree is empty, or if the cursor points before the
+    /// first or after the last element.
+    pub fn get(&self) -> Option<Pin<&Lrt::Target>> {
+        if let CursorPos::At(ent_node) = self.pos {
+            // SAFETY: `ent_node` points to a valid entry in the tree.
+            Some(unsafe { Lrt::borrow(ent_node) })
+        } else {
+            None
+        }
+    }
+
+    /// Return a clone of a reference to the current element.
+    ///
+    /// Returns `None` if the tree is empty, or if the cursor points before the
+    /// first or after the last element.
+    pub fn get_clone(&self) -> Option<Pin<Lrt::Ref>>
+    where
+        Lrt::Ref: Clone,
+    {
+        if let CursorPos::At(ent_node) = self.pos {
+            // SAFETY: `ent_node` points to a valid entry in the tree.
+            Some(unsafe { Lrt::borrow_clone(ent_node) })
+        } else {
+            None
+        }
+    }
+
+    /// Move to the next entry, if any.
+    ///
+    /// Move the cursor to point to the next entry. If the tree is empty, or if
+    /// the cursor points to the last element, this is a no-op.
+    pub fn move_next(&mut self) {
+        match self.pos {
+            CursorPos::Empty => {},
+            CursorPos::Front(ent_node) => {
+                self.pos = CursorPos::At(ent_node);
+            },
+            CursorPos::Back(_ent_node) => {},
+            CursorPos::At(ent_node) => {
+                // SAFETY: `ent_node` points to a valid entry in the tree.
+                if let Some(v) = NonNull::new(unsafe {
+                    kernel::bindings::rb_next(
+                        ent_node.as_ref().bindings.get(),
+                    )
+                }) {
+                    // SAFETY: `v` points to a valid entry in the tree, thus
+                    // it is embedded in a `Node`.
+                    self.pos = CursorPos::At(unsafe { Node::from_rb(v) });
+                } else {
+                    self.pos = CursorPos::Back(ent_node);
+                }
+            },
+        }
+    }
+
+    /// Move to the previous entry, if any.
+    ///
+    /// Move the cursor to point to the previous entry. If the tree is empty,
+    /// or if the cursor points to the first element, this is a no-op.
+    pub fn move_prev(&mut self) {
+        match self.pos {
+            CursorPos::Empty => {},
+            CursorPos::Front(_ent_node) => {},
+            CursorPos::Back(ent_node) => {
+                self.pos = CursorPos::At(ent_node);
+            },
+            CursorPos::At(ent_node) => {
+                // SAFETY: `ent_node` points to a valid entry in the tree.
+                if let Some(v) = NonNull::new(unsafe {
+                    kernel::bindings::rb_prev(
+                        ent_node.as_ref().bindings.get(),
+                    )
+                }) {
+                    // SAFETY: `v` points to a valid entry in the tree, thus
+                    // it is embedded in a `Node`.
+                    self.pos = CursorPos::At(unsafe { Node::from_rb(v) });
+                } else {
+                    self.pos = CursorPos::Front(ent_node);
+                }
+            },
+        }
+    }
+}
+
 impl<'tree, Lrt> CursorMut<'tree, Lrt>
 where
     Lrt: util::intrusive::Link<Node>,
@@ -728,6 +896,52 @@ where
         // SAFETY: `ent_node` was removed from the tree, as such it is
         //     guaranteed to not be used any further.
         unsafe { Lrt::release(ent_node) }
+    }
+
+    /// Return the reference target of the current element.
+    ///
+    /// Returns `None` if the tree is empty, or if the cursor points before the
+    /// first or after the last element.
+    pub fn get(&self) -> Option<Pin<&Lrt::Target>> {
+        if let CursorPos::At(ent_node) = self.pos {
+            // SAFETY: `ent_node` points to a valid entry in the tree.
+            Some(unsafe { Lrt::borrow(ent_node) })
+        } else {
+            None
+        }
+    }
+
+    /// Return the mutable reference target of the current element.
+    ///
+    /// Returns `None` if the tree is empty, or if the cursor points before the
+    /// first or after the last element.
+    pub fn get_mut(&mut self) -> Option<Pin<&mut Lrt::Target>>
+    where
+        Lrt: util::intrusive::LinkMut<Node>,
+    {
+        if let CursorPos::At(ent_node) = self.pos {
+            // SAFETY: `ent_node` points to a valid entry in the tree and the
+            // cursor is mutably borrowed for the same lifetime.
+            Some(unsafe { Lrt::borrow_mut(ent_node) })
+        } else {
+            None
+        }
+    }
+
+    /// Return a clone of a reference to the current element.
+    ///
+    /// Returns `None` if the tree is empty, or if the cursor points before the
+    /// first or after the last element.
+    pub fn get_clone(&self) -> Option<Pin<Lrt::Ref>>
+    where
+        Lrt::Ref: Clone,
+    {
+        if let CursorPos::At(ent_node) = self.pos {
+            // SAFETY: `ent_node` points to a valid entry in the tree.
+            Some(unsafe { Lrt::borrow_clone(ent_node) })
+        } else {
+            None
+        }
     }
 
     /// Move to the next entry, if any.
