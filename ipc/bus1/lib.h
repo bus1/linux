@@ -181,7 +181,8 @@ struct b1_op *b1_op_free(struct b1_op *op);
 
 int b1_op_send_message(
 	struct b1_op *op,
-	size_t n_transfers,
+	struct b1_handle *to,
+	u64 n_transfers,
 	struct b1_handle **transfers,
 	struct b1_message_shared *shared
 );

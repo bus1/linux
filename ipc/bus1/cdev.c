@@ -875,6 +875,7 @@ b1_cdev_send_commit(
 
 		r = b1_op_send_message(
 			op,
+			uhandle->handle,
 			umessage->n_transfers,
 			umessage->transfers,
 			umessage->shared
