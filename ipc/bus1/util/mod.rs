@@ -7,6 +7,8 @@
 use kernel::prelude::*;
 use kernel::sync::{Arc, ArcBorrow};
 
+pub mod field;
+
 /// Convert an Arc to its pinned version.
 ///
 /// All [`Arc`] instances are unconditionally pinned. It is always safe to
