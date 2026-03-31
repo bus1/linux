@@ -7,6 +7,7 @@
 use kernel::prelude::*;
 use kernel::sync::{Arc, ArcBorrow};
 
+pub mod convert;
 pub mod field;
 
 /// Convert an Arc to its pinned version.
