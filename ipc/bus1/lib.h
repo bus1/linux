@@ -25,9 +25,15 @@ struct b1_acct_charge;
 struct b1_acct_trace;
 struct b1_acct_user;
 struct b1_handle;
+struct b1_message_shared;
 struct b1_node;
 struct b1_op;
 struct b1_peer;
+struct b1_peer_peek;
+struct b1_peer_peek_handle_release;
+struct b1_peer_peek_node_release;
+union  b1_peer_peek_union;
+struct b1_peer_peek_user;
 
 /* accounting */
 
@@ -90,7 +96,7 @@ DEFINE_FREE(
 
 struct b1_peer_peek {
 	u64 type;
-	union {
+	union b1_peer_peek_union {
 		struct b1_peer_peek_user {
 			struct b1_node *node;
 			u64 n_transfers;
