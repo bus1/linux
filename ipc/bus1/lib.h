@@ -30,11 +30,6 @@ struct b1_peer;
 
 /* accounting */
 
-static const int B1_ACCT_ERROR_INVALID = EINVAL;
-static const int B1_ACCT_ERROR_OOM = ENOMEM;
-static const int B1_ACCT_ERROR_USER_QUOTA = EDQUOT;
-static const int B1_ACCT_ERROR_ACTOR_QUOTA = EXFULL;
-
 enum: size_t {
 	B1_ACCT_SLOT_OBJECTS,
 	B1_ACCT_SLOT_BYTES,

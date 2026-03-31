@@ -1377,7 +1377,7 @@ pub unsafe extern "C" fn acct_new(
     // SAFETY: Delegated to caller.
     match Acct::new(unsafe { &*maxima }) {
         Ok(v) => Acct::into_raw(v),
-        Err(AllocError) => Error::from_errno(capi::B1_ACCT_ERROR_OOM).to_ptr(),
+        Err(AllocError) => ENOMEM.to_ptr(),
     }
 }
 
@@ -1458,7 +1458,7 @@ pub unsafe extern "C" fn actor_new(
     );
     let r = match Actor::with((*user_ref).clone()) {
         Ok(v) => Actor::into_raw(v),
-        Err(AllocError) => Error::from_errno(capi::B1_ACCT_ERROR_OOM).to_ptr(),
+        Err(AllocError) => ENOMEM.to_ptr(),
     };
     let _ = UserRef::into_raw(ManuallyDrop::into_inner(user_ref));
     r
@@ -1564,7 +1564,7 @@ pub unsafe extern "C" fn actor_charge(
     let amount_ref = unsafe { amount_nn.as_ref() };
 
     let r = if !charge_ref.inner.trace.is_null() {
-        capi::B1_ACCT_ERROR_INVALID
+        EINVAL.to_errno()
     } else {
         match this_ref.as_arc_borrow().charge(
             claimant_ref.as_arc_borrow(),
@@ -1575,13 +1575,13 @@ pub unsafe extern "C" fn actor_charge(
                 0
             },
             Err(ChargeError::Alloc(AllocError)) => {
-                capi::B1_ACCT_ERROR_OOM
+                ENOMEM.to_errno()
             },
             Err(ChargeError::UserQuota) => {
-                capi::B1_ACCT_ERROR_USER_QUOTA
+                EDQUOT.to_errno()
             },
             Err(ChargeError::ActorQuota) => {
-                capi::B1_ACCT_ERROR_ACTOR_QUOTA
+                EXFULL.to_errno()
             },
         }
     };
@@ -1615,7 +1615,7 @@ pub unsafe extern "C" fn acct_get_user(
     );
     let r = match this_ref.as_arc_borrow().get_user(id) {
         Ok(v) => UserRef::into_raw(v),
-        Err(AllocError) => Error::from_errno(capi::B1_ACCT_ERROR_OOM).to_ptr(),
+        Err(AllocError) => ENOMEM.to_ptr(),
     };
     let _ = Acct::into_raw(ManuallyDrop::into_inner(this_ref));
     r
